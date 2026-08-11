@@ -1,0 +1,590 @@
+/* Theme overrides for Dash's native form controls - ported verbatim from
+   XP-A's dashboard/assets/style.css so the two projects share one visual
+   identity. See that file's header comment for why these rules exist
+   (Dash's own component CSS can't be reached via Python style props).
+   Colors mirror the constants in dashboard/layout.py.
+
+   Everything colored anywhere in this app (both these rules and every
+   inline `style` dict in layout.py) reads one of the --fpa-* tokens below
+   rather than a literal color, for exactly one reason: callbacks.toggle_theme
+   / apply_theme just flip `data-theme` on <html>, and because every color
+   is a var() lookup, that one attribute change instantly re-paints the
+   whole app - no re-render, no server round-trip. A color written as a
+   literal hex/rgba anywhere would silently opt that one element out of
+   theming, so don't - add a token here (light + dark) instead. */
+
+:root {
+  --fpa-page: #0b0b12;
+  --fpa-surface: #171724;
+  --fpa-surface-2: #1f1f30;
+  --fpa-border: rgba(255, 255, 255, 0.08);
+  --fpa-text: #ffffff;
+  --fpa-text-secondary: #a3a3b8;
+  --fpa-text-muted: #6f6f85;
+  --fpa-accent: #8b5cf6;
+  --fpa-accent-hover: #7c4fe0;
+  --fpa-accent-active: #6d3fd6;
+  --fpa-accent-soft: rgba(139, 92, 246, 0.14);
+  --fpa-accent-glow: rgba(139, 92, 246, 0.22);
+  --fpa-critical: #c1272d;
+  --fpa-critical-soft: rgba(193, 39, 45, 0.12);
+  --fpa-good: #0ca30c;
+  --fpa-good-soft: rgba(12, 163, 12, 0.12);
+  /* A subtle lighten-the-surface tint (dropdown-option hover, quiet-button
+     hover, the inactive version badge's fill) - always the *opposite* of
+     --fpa-text's own tint, since it's meant to nudge the surface a step
+     towards the text color, not towards white specifically. */
+  --fpa-hover-overlay: rgba(255, 255, 255, 0.08);
+  --fpa-shadow-lg: rgba(0, 0, 0, 0.55);
+  --fpa-overlay-backdrop: rgba(0, 0, 0, 0.6);
+  --fpa-sidebar-bg: #16213e;
+  --fpa-sidebar-text: #eef1f8;
+  --fpa-sidebar-text-muted: #93a0bf;
+  --fpa-sidebar-active-bg: rgba(255, 255, 255, 0.10);
+}
+
+:root[data-theme="light"] {
+  --fpa-page: #eef1f6;
+  --fpa-surface: #ffffff;
+  --fpa-surface-2: #f4f6f9;
+  --fpa-border: rgba(15, 23, 42, 0.10);
+  --fpa-text: #16213e;
+  --fpa-text-secondary: #4b5670;
+  --fpa-text-muted: #8993ab;
+  /* Navy blue in light mode, on purpose, not the dark theme's purple -
+     matches the reference BI dashboard's button/accent color. */
+  --fpa-accent: #2f4d7a;
+  --fpa-accent-hover: #264066;
+  --fpa-accent-active: #1e3352;
+  --fpa-accent-soft: rgba(47, 77, 122, 0.12);
+  --fpa-accent-glow: rgba(47, 77, 122, 0.25);
+  --fpa-critical: #c1272d;
+  --fpa-critical-soft: rgba(193, 39, 45, 0.08);
+  --fpa-good: #0ca30c;
+  --fpa-good-soft: rgba(12, 163, 12, 0.08);
+  --fpa-hover-overlay: rgba(15, 23, 42, 0.05);
+  --fpa-shadow-lg: rgba(15, 23, 42, 0.18);
+  --fpa-overlay-backdrop: rgba(15, 23, 42, 0.4);
+  --fpa-sidebar-bg: #16213e;
+  --fpa-sidebar-text: #eef1f8;
+  --fpa-sidebar-text-muted: #93a0bf;
+  --fpa-sidebar-active-bg: rgba(255, 255, 255, 0.10);
+}
+
+html, body {
+  background: var(--fpa-page);
+}
+
+input[type="radio"], input[type="checkbox"] {
+  accent-color: var(--fpa-accent);
+}
+
+.dash-dropdown {
+  background: var(--fpa-surface) !important;
+  border: 1px solid var(--fpa-border) !important;
+  border-radius: 8px !important;
+  color: var(--fpa-text) !important;
+  min-height: 36px;
+}
+.dash-dropdown:hover {
+  border-color: var(--fpa-accent) !important;
+}
+.dash-dropdown-value, .dash-dropdown-value-item {
+  color: var(--fpa-text) !important;
+}
+.dash-dropdown-content {
+  background: var(--fpa-surface-2) !important;
+  border: 1px solid var(--fpa-border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 12px 28px var(--fpa-shadow-lg) !important;
+  overflow: hidden;
+}
+.dash-dropdown-search-container {
+  background: var(--fpa-surface-2) !important;
+  border-bottom: 1px solid var(--fpa-border) !important;
+  color: var(--fpa-text-muted) !important;
+}
+.dash-dropdown-search {
+  background: transparent !important;
+  color: var(--fpa-text) !important;
+}
+.dash-dropdown-search::placeholder {
+  color: var(--fpa-text-muted) !important;
+}
+.dash-options-list, .dash-dropdown-options {
+  background: var(--fpa-surface-2) !important;
+}
+.dash-dropdown-option {
+  color: var(--fpa-text-secondary) !important;
+  background: transparent !important;
+}
+.dash-dropdown-option:hover {
+  background: var(--fpa-hover-overlay) !important;
+  color: var(--fpa-text) !important;
+}
+.dash-dropdown-option.selected {
+  color: var(--fpa-accent) !important;
+  background: var(--fpa-accent-soft) !important;
+}
+
+.dash-input-element, .dash-textarea {
+  background: var(--fpa-surface) !important;
+  border: 1px solid var(--fpa-border) !important;
+  border-radius: 6px !important;
+  color: var(--fpa-text) !important;
+  padding: 4px 8px;
+}
+.dash-input-element::placeholder, .dash-textarea::placeholder {
+  color: var(--fpa-text-muted) !important;
+}
+.dash-input-element:focus, .dash-textarea:focus {
+  outline: none !important;
+  border-color: var(--fpa-accent) !important;
+}
+.dash-dropdown:has(.dash-dropdown-trigger):focus-within {
+  border-color: var(--fpa-accent) !important;
+}
+.dash-input-container, .dash-input {
+  background: transparent !important;
+}
+.dash-input-stepper {
+  background: var(--fpa-surface-2) !important;
+  color: var(--fpa-text-secondary) !important;
+  border: none !important;
+}
+.dash-input-stepper:hover {
+  background: var(--fpa-hover-overlay) !important;
+  color: var(--fpa-text) !important;
+}
+
+button {
+  background: var(--fpa-accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+button:hover {
+  background: var(--fpa-accent-hover);
+}
+button:active {
+  background: var(--fpa-accent-active);
+}
+button.fpa-btn-danger {
+  background: transparent;
+  border: 1px solid var(--fpa-critical);
+  color: var(--fpa-critical);
+}
+button.fpa-btn-danger:hover {
+  background: var(--fpa-critical-soft);
+}
+
+/* Secondary/tertiary actions (tour's Skip/Back/close ×) - so they don't
+   flash the same loud accent purple as a primary action like "بعدی" on
+   hover (button:hover above would otherwise apply to them too, since a
+   pseudo-class can't be beaten by an inline style). */
+button.fpa-btn-quiet {
+  background: transparent;
+}
+button.fpa-btn-quiet:hover {
+  background: var(--fpa-hover-overlay);
+}
+
+/* --- light/dark theme toggle (fixed top-left, independent of RTL) --- */
+/* Lives inside .fpa-sidebar (always the fixed navy below, regardless of
+   theme), so - unlike everything else in this file - it deliberately does
+   NOT use --fpa-surface/--fpa-border/--fpa-text: those flip to near-white
+   in the light theme, which would paint a near-white circle on top of a
+   sidebar that never itself goes light. */
+.fpa-theme-toggle {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--fpa-sidebar-text);
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.fpa-theme-toggle:hover {
+  filter: brightness(1.3);
+}
+
+/* ==========================================================================
+   Sidebar — persistent module navigation (Workflow / 3 Statements /
+   Actual vs Budget / Admin). Always the same navy regardless of the
+   light/dark toggle, like the reference dashboard's nav rail - it's app
+   chrome, not page content, so it isn't one of the things the theme
+   changes.
+   ========================================================================== */
+.fpa-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  min-height: 100vh;
+  background: var(--fpa-sidebar-bg);
+  color: var(--fpa-sidebar-text);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.fpa-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fpa-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fpa-sidebar-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  color: var(--fpa-sidebar-text-muted);
+  border: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.fpa-sidebar-btn:hover {
+  background: var(--fpa-sidebar-active-bg);
+  color: var(--fpa-sidebar-text);
+}
+.fpa-sidebar-btn.fpa-sidebar-btn-active {
+  background: var(--fpa-sidebar-active-bg);
+  color: var(--fpa-sidebar-text);
+  box-shadow: inset 0 0 0 1.5px var(--fpa-accent);
+}
+.fpa-sidebar-icon {
+  font-size: 15px;
+}
+
+/* ==========================================================================
+   Workflow canvas — drag-and-drop specific to FP-A (no XP-A equivalent)
+   ========================================================================== */
+
+/* --- role palette chips (draggable source) --- */
+.fpa-role-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--fpa-surface-2);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  cursor: grab;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #ffffff;
+  user-select: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.fpa-role-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+}
+.fpa-role-chip:active {
+  cursor: grabbing;
+}
+.fpa-role-chip .fpa-drag-handle {
+  opacity: 0.75;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.fpa-role-chip-label,
+.fpa-editable-label {
+  cursor: pointer;
+  border-bottom: 1px dotted transparent;
+  display: inline-block;
+}
+/* .fpa-role-chip-label sits on a role chip's own saturated color (fixed
+   regardless of theme), so its hover hint stays a literal white - but
+   .fpa-editable-label (the instance-name click-to-rename hint) sits on the
+   plain page surface, so it needs the theme-aware token instead or it'd be
+   invisible against a light surface. */
+.fpa-role-chip-label:hover {
+  border-bottom-color: rgba(255, 255, 255, 0.5);
+}
+.fpa-editable-label:hover {
+  border-bottom-color: var(--fpa-text-muted);
+}
+.fpa-role-chip-editing {
+  cursor: default;
+}
+/* --- ✓/× on an editing role chip (visually matches .fpa-remove on a
+   canvas chip on purpose - both are "small icon action on a colored
+   chip") --- */
+.fpa-chip-icon-btn {
+  background: rgba(0, 0, 0, 0.25);
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.fpa-chip-icon-btn:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* --- canvas dropzone --- */
+.fpa-canvas-dropzone {
+  border: 2px dashed var(--fpa-border);
+  border-radius: 12px;
+  padding: 28px;
+  min-height: 160px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.fpa-canvas-dropzone.fpa-drag-over {
+  border-color: var(--fpa-accent);
+  background: var(--fpa-accent-soft);
+}
+.fpa-canvas {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 104px;
+  flex: 1 1 auto;
+  min-width: 220px;
+}
+.fpa-canvas-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 104px;
+  color: var(--fpa-text-muted);
+  font-size: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+.fpa-canvas-empty .fpa-plus {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px dashed var(--fpa-text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* --- flow endpoints (decorative START/END pills) --- */
+.fpa-endpoint {
+  flex-shrink: 0;
+  border: 1.5px solid var(--fpa-text-muted);
+  border-radius: 999px;
+  padding: 10px 20px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fpa-text-secondary);
+  background: var(--fpa-surface);
+}
+
+/* --- step box (draggable within canvas) --- */
+.fpa-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--fpa-surface-2);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  padding: 16px 20px;
+  min-width: 150px;
+  cursor: grab;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: #ffffff;
+  position: relative;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.fpa-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.4);
+}
+.fpa-chip.fpa-dragging {
+  opacity: 0.35;
+}
+.fpa-chip .fpa-step-index {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: var(--fpa-surface);
+  color: var(--fpa-text-secondary);
+  border: 1px solid var(--fpa-border);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.fpa-chip .fpa-remove {
+  background: rgba(0, 0, 0, 0.25);
+  border: none;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  line-height: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  margin-right: -4px;
+  flex-shrink: 0;
+}
+.fpa-chip .fpa-remove:hover {
+  background: var(--fpa-critical);
+  color: #ffffff;
+}
+.fpa-arrow {
+  color: var(--fpa-text-muted);
+  font-size: 20px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+/* --- trash zone --- */
+.fpa-trash-zone {
+  margin-top: 14px;
+  text-align: center;
+  padding: 12px;
+  border: 1px dashed var(--fpa-border);
+  border-radius: 8px;
+  color: var(--fpa-text-muted);
+  font-size: 13px;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.fpa-trash-zone.fpa-drag-over {
+  border-color: var(--fpa-critical);
+  background: rgba(193, 39, 45, 0.1);
+  color: var(--fpa-critical);
+}
+
+/* --- instance step tracker (read-only, click a step to set it as current) --- */
+.fpa-instance-row {
+  border-top: 1px solid var(--fpa-border);
+  padding: 18px 0;
+}
+.fpa-instance-row:first-child {
+  border-top: none;
+  padding-top: 4px;
+}
+.fpa-instance-name {
+  font-weight: 700;
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+/* the plain-language answer to "where are we" - not just color-coding */
+.fpa-current-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--fpa-accent-soft);
+  color: var(--fpa-accent);
+  border: 1px solid var(--fpa-accent);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.fpa-track {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: 20px;
+}
+.fpa-track-connector {
+  width: 22px;
+  height: 2px;
+  background: var(--fpa-border);
+  flex-shrink: 0;
+}
+.fpa-track-connector.fpa-connector-done {
+  background: var(--fpa-good);
+}
+.fpa-pill {
+  border: 2px solid var(--fpa-border);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  background: var(--fpa-surface-2);
+  color: var(--fpa-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+.fpa-pill.fpa-pill-done {
+  background: rgba(12, 163, 12, 0.12);
+  color: #4fd24f;
+  border-color: rgba(12, 163, 12, 0.4);
+}
+.fpa-pill.fpa-pill-current {
+  background: var(--fpa-accent);
+  color: #ffffff;
+  border-color: var(--fpa-accent);
+  box-shadow: 0 0 0 4px var(--fpa-accent-glow);
+  transform: scale(1.05);
+}
+.fpa-pill.fpa-pill-upcoming {
+  opacity: 0.55;
+}
+.fpa-pill-current-label {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fpa-accent);
+  white-space: nowrap;
+}
+.fpa-pill:hover {
+  filter: brightness(1.15);
+}

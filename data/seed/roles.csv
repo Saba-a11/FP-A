@@ -1,0 +1,6 @@
+role_code,role_name,color_hex
+PREPARER,تهیه‌کننده,#0891b2
+DEPT_HEAD,مدیر بخش,#8b5cf6
+FIN_REVIEWER,بازبین مالی,#ec4899
+CONTROLLER,کنترلر مالی,#d97706
+CFO,CFO,#0f766e
