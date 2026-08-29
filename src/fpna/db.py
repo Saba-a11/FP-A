@@ -15,7 +15,12 @@ def get_connection(db_path: Path | None = None) -> duckdb.DuckDBPyConnection:
 
 def run_sql_file(conn: duckdb.DuckDBPyConnection, sql_path: Path) -> None:
     """Execute each ';'-separated statement in a .sql file."""
-    statements = [s.strip() for s in sql_path.read_text().split(";") if s.strip()]
+    # encoding="utf-8" is not optional here: Path.read_text() otherwise
+    # decodes with the OS default (cp1252 on this Windows box), which
+    # cannot represent schema.sql's Persian column comments and crashes
+    # every app startup with a UnicodeDecodeError - hit for real while
+    # testing this exact change.
+    statements = [s.strip() for s in sql_path.read_text(encoding="utf-8").split(";") if s.strip()]
     for statement in statements:
         conn.execute(statement)
 

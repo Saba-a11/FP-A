@@ -179,3 +179,55 @@ def test_list_versions_reports_step_count(conn, roles):
     )
     versions = {v["version_id"]: v for v in workflow.list_versions(conn)}
     assert versions[v1]["step_count"] == 2
+
+
+def test_get_or_create_instance_creates_named_after_version(conn, roles):
+    version_id = workflow.create_version(conn, "FY2027 Budget Approval")
+    workflow.save_steps(conn, version_id, [{"role_id": roles["preparer"], "label": None}])
+    instance = workflow.get_or_create_instance(conn, version_id)
+    assert instance["name"] == "FY2027 Budget Approval"
+    version = workflow.get_version(conn, version_id)
+    assert instance["current_step_id"] == version["steps"][0]["step_id"]
+
+
+def test_get_or_create_instance_is_idempotent(conn):
+    version_id = workflow.create_version(conn, "v1")
+    first = workflow.get_or_create_instance(conn, version_id)
+    second = workflow.get_or_create_instance(conn, version_id)
+    assert first["instance_id"] == second["instance_id"]
+    assert len(workflow.list_instances(conn, version_id)) == 1
+
+
+def test_get_or_create_instance_returns_existing_instance_unchanged(conn, roles):
+    version_id = workflow.create_version(conn, "v1")
+    workflow.save_steps(conn, version_id, [{"role_id": roles["preparer"], "label": None}])
+    instance_id = workflow.create_instance(conn, version_id, "Custom Cycle Name")
+    workflow.rename_instance(conn, instance_id, "Renamed Cycle")
+    instance = workflow.get_or_create_instance(conn, version_id)
+    assert instance["instance_id"] == instance_id
+    assert instance["name"] == "Renamed Cycle"
+
+
+def test_role_step_usage_count(conn, roles):
+    version_id = workflow.create_version(conn, "v1")
+    assert workflow.role_step_usage_count(conn, roles["preparer"]) == 0
+    workflow.save_steps(
+        conn,
+        version_id,
+        [{"role_id": roles["preparer"], "label": None}, {"role_id": roles["preparer"], "label": None}],
+    )
+    assert workflow.role_step_usage_count(conn, roles["preparer"]) == 2
+    assert workflow.role_step_usage_count(conn, roles["cfo"]) == 0
+
+
+def test_delete_role_removes_unused_role(conn, roles):
+    workflow.delete_role(conn, roles["cfo"])
+    remaining = {r["role_id"] for r in workflow.list_roles(conn)}
+    assert roles["cfo"] not in remaining
+
+
+def test_delete_role_raises_when_role_in_use(conn, roles):
+    version_id = workflow.create_version(conn, "v1")
+    workflow.save_steps(conn, version_id, [{"role_id": roles["preparer"], "label": None}])
+    with pytest.raises(duckdb.ConstraintException):
+        workflow.delete_role(conn, roles["preparer"])

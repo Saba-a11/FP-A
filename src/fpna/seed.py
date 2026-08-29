@@ -28,6 +28,7 @@ def run_seed(db_path=None) -> duckdb.DuckDBPyConnection:
 
     retranslate_seeded_role_names(conn)
     unfreeze_default_step_labels(conn)
+    migrate_eligibility_to_acceptance_criteria(conn)
 
     return conn
 
@@ -72,6 +73,27 @@ def unfreeze_default_step_labels(conn: duckdb.DuckDBPyConnection) -> None:
         f"UPDATE workflow_step SET label = NULL WHERE label IN ({placeholders})",
         list(_OLD_DEFAULT_ROLE_LABELS),
     )
+
+
+# eligibility (شرایط احراز - who's qualified to hold the role) was replaced
+# by acceptance_criteria (شرایط پذیرش خروجی - what makes a submitted output
+# acceptable) - schema.sql only ever ADDs acceptance_criteria going forward,
+# so a database still carrying the old column needs its data carried over
+# once. Runs every startup, like retranslate_seeded_role_names above; a
+# no-op (one cheap information_schema lookup) once the old column is gone.
+def migrate_eligibility_to_acceptance_criteria(conn: duckdb.DuckDBPyConnection) -> None:
+    has_old_column = conn.execute(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_name = 'workflow_step' AND column_name = 'eligibility'"
+    ).fetchone()[0]
+    if not has_old_column:
+        return
+    conn.execute(
+        "UPDATE workflow_step SET acceptance_criteria = eligibility "
+        "WHERE acceptance_criteria IS NULL AND eligibility IS NOT NULL"
+    )
+    conn.execute("ALTER TABLE workflow_step DROP COLUMN eligibility")
+    print("Migrated workflow_step.eligibility -> acceptance_criteria and dropped the old column")
 
 
 if __name__ == "__main__":

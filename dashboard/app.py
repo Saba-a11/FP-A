@@ -59,8 +59,20 @@ def create_app() -> dash.Dash:
         selected_version_id = versions[0]["version_id"]
         selected_version = workflow.get_version(conn, selected_version_id)
         roles = workflow.list_roles(conn)
-        instances = workflow.list_instances(conn, selected_version_id)
-        return layout.build_shell(roles, versions, selected_version, instances)
+        # Always exactly the version's one run (auto-created on first look,
+        # no separate "create an instance" step) - see
+        # fpna.workflow.get_or_create_instance.
+        instances = [workflow.get_or_create_instance(conn, selected_version_id)]
+        status_summary = workflow.step_status_summary(conn, selected_version_id)
+        history_by_instance = {i["instance_id"]: workflow.list_instance_history(conn, i["instance_id"]) for i in instances}
+        return layout.build_shell(
+            roles,
+            versions,
+            selected_version,
+            instances,
+            status_summary=status_summary,
+            history_by_instance=history_by_instance,
+        )
 
     app.layout = serve_layout
     callbacks.register_callbacks(app, conn)

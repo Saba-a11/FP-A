@@ -194,6 +194,155 @@ button.fpa-btn-quiet:hover {
   background: var(--fpa-hover-overlay);
 }
 
+/* Small square icon-only button (canvas undo ↩) - a plain fpa-btn-quiet
+   with generous side padding reads as a wide pill once the label shrinks
+   to one glyph, so this gets its own fixed, roughly-square box instead. */
+button.fpa-icon-btn {
+  background: transparent;
+  border: 1px solid var(--fpa-border);
+  color: var(--fpa-text-secondary);
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+}
+button.fpa-icon-btn:hover {
+  background: var(--fpa-hover-overlay);
+  color: var(--fpa-text);
+}
+
+/* Design / نمونه‌های در حال اجرا tab switcher atop the workflow page - see
+   layout.build_workflow_tab_bar. Underline-style, not filled pills, so it
+   reads as "which view" rather than competing with the primary buttons
+   inside each view. */
+.fpa-workflow-tab-bar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--fpa-border);
+  margin: 14px 0 20px;
+}
+button.fpa-workflow-tab {
+  background: transparent;
+  color: var(--fpa-text-secondary);
+  border: none;
+  border-radius: 0;
+  padding: 9px 4px;
+  margin-left: 22px;
+  font-size: 13.5px;
+  border-bottom: 2px solid transparent;
+}
+button.fpa-workflow-tab:hover {
+  background: transparent;
+  color: var(--fpa-text);
+}
+button.fpa-workflow-tab.fpa-workflow-tab-active {
+  color: var(--fpa-accent);
+  border-bottom-color: var(--fpa-accent);
+  font-weight: 600;
+}
+
+/* Compact per-step detail badges (owner/duty/input/output/
+   acceptance_criteria/template) replacing what used to be a full card per step - see
+   layout.build_step_details_list. Numbered so they line up 1:1 with the
+   canvas order; filled ring means "this step already has details saved". */
+button.fpa-step-badge {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+}
+button.fpa-step-badge:hover {
+  opacity: 0.85;
+}
+button.fpa-step-badge.fpa-step-badge-filled {
+  opacity: 1;
+  border-color: var(--fpa-text);
+}
+
+/* Collapsed-by-default instance history toggle - see
+   layout.build_instance_history. Deliberately looks like plain muted text
+   with an affordance glyph, not a boxed button, so a list of many
+   instances doesn't turn into a wall of buttons. */
+button.fpa-history-toggle {
+  background: transparent;
+  color: var(--fpa-text-muted);
+  border: none;
+  padding: 2px 0;
+  font-size: 11px;
+}
+button.fpa-history-toggle:hover {
+  background: transparent;
+  color: var(--fpa-text-secondary);
+}
+
+/* dcc.Upload rendered to look like a plain quiet button (JSON import in
+   the version bar) - Dash gives Upload no default styling at all, so this
+   is the whole appearance, not an override. */
+.fpa-upload-inline-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--fpa-border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--fpa-text);
+  cursor: pointer;
+}
+.fpa-upload-inline-btn:hover {
+  background: var(--fpa-hover-overlay);
+}
+
+/* Same square-icon treatment as button.fpa-icon-btn, for the JSON-import
+   dcc.Upload sitting next to the JSON-export icon button in the version
+   bar - these two are occasional/secondary actions, so they read as a
+   matched pair of small icons rather than two more full-width buttons
+   competing with "+ نسخه‌ی جدید" / "فعال‌سازی" for attention. */
+.fpa-upload-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--fpa-border);
+  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  color: var(--fpa-text-secondary);
+  cursor: pointer;
+}
+.fpa-upload-icon-btn:hover {
+  background: var(--fpa-hover-overlay);
+  color: var(--fpa-text);
+}
+
+/* dcc.Upload as a full dropzone (step template file) - visually matches
+   .fpa-canvas-dropzone on purpose, same "drop something here" affordance. */
+.fpa-upload-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--fpa-border);
+  border-radius: 8px;
+  padding: 14px;
+  color: var(--fpa-text-muted);
+  cursor: pointer;
+}
+.fpa-upload-zone:hover {
+  border-color: var(--fpa-accent);
+}
+
 /* --- light/dark theme toggle (fixed top-left, independent of RTL) --- */
 /* Lives inside .fpa-sidebar (always the fixed navy below, regardless of
    theme), so - unlike everything else in this file - it deliberately does
@@ -279,35 +428,63 @@ button.fpa-btn-quiet:hover {
    Workflow canvas — drag-and-drop specific to FP-A (no XP-A equivalent)
    ========================================================================== */
 
-/* --- role palette chips (draggable source) --- */
+/* --- role palette chips (draggable source) ---
+   Neutral card + a small color-mixed "badge" carrying the role's color,
+   instead of the old full-saturation fill - see fpa-role-badge below. Each
+   chip sets --role-color inline (its role's color_hex, from
+   layout.build_role_palette/build_canvas_children and dragdrop.js's own
+   copy of that markup) - every color-bearing rule here reads that one
+   custom property, so there's exactly one place per chip that ever
+   mentions the raw hex. */
 .fpa-role-chip {
   display: flex;
   align-items: center;
   gap: 10px;
   background: var(--fpa-surface-2);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--fpa-border);
   border-radius: 10px;
-  padding: 14px 16px;
+  padding: 12px 16px;
   margin-bottom: 10px;
   cursor: grab;
   font-size: 14.5px;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--fpa-text);
   user-select: none;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  box-shadow: 0 1px 3px var(--fpa-shadow-lg);
+  transition: transform 0.1s ease, box-shadow 0.1s ease, border-color 0.1s ease;
 }
 .fpa-role-chip:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+  border-color: color-mix(in srgb, var(--role-color, var(--fpa-accent)) 45%, var(--fpa-border));
+  box-shadow: 0 4px 10px var(--fpa-shadow-lg);
 }
 .fpa-role-chip:active {
   cursor: grabbing;
 }
 .fpa-role-chip .fpa-drag-handle {
-  opacity: 0.75;
+  color: var(--fpa-text-muted);
   font-size: 13px;
   flex-shrink: 0;
+}
+/* --- role color badge: a small rounded square carrying the role's
+   initial, on a soft color-mixed tint of --role-color rather than a flat
+   fill - this is the "colorful button" replacement itself (role palette
+   chip and canvas step chip both use it, see build_canvas_children's own
+   .fpa-chip-badge). */
+.fpa-role-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  background: color-mix(in srgb, var(--role-color, var(--fpa-accent)) 20%, var(--fpa-surface));
+  color: var(--role-color, var(--fpa-accent));
+  border: 1px solid color-mix(in srgb, var(--role-color, var(--fpa-accent)) 42%, transparent);
 }
 .fpa-role-chip-label,
 .fpa-editable-label {
@@ -315,14 +492,7 @@ button.fpa-btn-quiet:hover {
   border-bottom: 1px dotted transparent;
   display: inline-block;
 }
-/* .fpa-role-chip-label sits on a role chip's own saturated color (fixed
-   regardless of theme), so its hover hint stays a literal white - but
-   .fpa-editable-label (the instance-name click-to-rename hint) sits on the
-   plain page surface, so it needs the theme-aware token instead or it'd be
-   invisible against a light surface. */
-.fpa-role-chip-label:hover {
-  border-bottom-color: rgba(255, 255, 255, 0.5);
-}
+.fpa-role-chip-label:hover,
 .fpa-editable-label:hover {
   border-bottom-color: var(--fpa-text-muted);
 }
@@ -330,12 +500,12 @@ button.fpa-btn-quiet:hover {
   cursor: default;
 }
 /* --- ✓/× on an editing role chip (visually matches .fpa-remove on a
-   canvas chip on purpose - both are "small icon action on a colored
+   canvas chip on purpose - both are "small icon action on a neutral
    chip") --- */
 .fpa-chip-icon-btn {
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--fpa-hover-overlay);
   border: none;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--fpa-text-secondary);
   font-size: 13px;
   line-height: 1;
   width: 22px;
@@ -349,7 +519,8 @@ button.fpa-btn-quiet:hover {
   flex-shrink: 0;
 }
 .fpa-chip-icon-btn:hover {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--fpa-accent-soft);
+  color: var(--fpa-accent);
 }
 
 /* --- canvas dropzone --- */
@@ -411,27 +582,30 @@ button.fpa-btn-quiet:hover {
   background: var(--fpa-surface);
 }
 
-/* --- step box (draggable within canvas) --- */
+/* --- step box (draggable within canvas) --- same neutral-card-plus-badge
+   treatment as .fpa-role-chip above, via the same --role-color/
+   .fpa-role-badge pair. */
 .fpa-chip {
   display: flex;
   align-items: center;
   gap: 10px;
   background: var(--fpa-surface-2);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--fpa-border);
   border-radius: 10px;
-  padding: 16px 20px;
+  padding: 14px 18px;
   min-width: 150px;
   cursor: grab;
   font-size: 14.5px;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--fpa-text);
   position: relative;
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  box-shadow: 0 2px 6px var(--fpa-shadow-lg);
+  transition: transform 0.1s ease, box-shadow 0.1s ease, border-color 0.1s ease;
 }
 .fpa-chip:hover {
   transform: translateY(-1px);
-  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.4);
+  border-color: color-mix(in srgb, var(--role-color, var(--fpa-accent)) 45%, var(--fpa-border));
+  box-shadow: 0 4px 12px var(--fpa-shadow-lg);
 }
 .fpa-chip.fpa-dragging {
   opacity: 0.35;
@@ -454,9 +628,9 @@ button.fpa-btn-quiet:hover {
   font-variant-numeric: tabular-nums;
 }
 .fpa-chip .fpa-remove {
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--fpa-hover-overlay);
   border: none;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--fpa-text-secondary);
   font-size: 13px;
   line-height: 1;
   width: 18px;

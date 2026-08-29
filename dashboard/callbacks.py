@@ -4,17 +4,20 @@ The drag-and-drop canvas itself is owned by client-side JS
 (assets/dragdrop.js) - it writes the current step list into
 workflow-steps-store via dash_clientside.set_props(). Everything here is
 the server-side half: version switching/creation/activation, persisting
-the step list on Save, managing roles, and instances (create + mark
-current step).
+the step list on Save, managing roles, instances, step detail/templates,
+and the JSON export/import of a version.
 """
 
+import base64
+import hashlib
+import json
 from datetime import datetime
 
 import duckdb
-from dash import ALL, Input, Output, State, ctx, no_update
+from dash import ALL, Input, Output, State, ctx, dcc, no_update
 
 import layout
-from fpna import config, db, workflow
+from fpna import config, db, notify, workflow
 
 DEFAULT_VERSION_NAME = "گردش‌کار جدید"
 
@@ -22,8 +25,39 @@ DEFAULT_VERSION_NAME = "گردش‌کار جدید"
 def _load_view(conn: duckdb.DuckDBPyConnection, version_id: int | None):
     versions = workflow.list_versions(conn)
     version = workflow.get_version(conn, version_id) if version_id is not None else None
-    instances = workflow.list_instances(conn, version_id) if version_id is not None else []
-    return versions, version, instances
+    # Always exactly the version's one run (auto-created on first look) -
+    # see workflow.get_or_create_instance.
+    instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+    summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
+    return versions, version, instances, summary
+
+
+def _history_by_instance(conn: duckdb.DuckDBPyConnection, instances: list[dict]) -> dict[int, list[dict]]:
+    return {i["instance_id"]: workflow.list_instance_history(conn, i["instance_id"]) for i in instances}
+
+
+def _notify_step_change(
+    conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int, step_id: int, event: str, note: str | None = None
+) -> None:
+    """Best-effort Telegram notification for one step transition - called
+    right after every workflow.set_current_step/skip_current_step call that
+    changes an instance's current step, and from save_steps for the one-time
+    "this workflow's run now has a real current step" moment. Deliberately
+    swallows its own result (see notify.notify_step_change's (ok, error)
+    return): per the grill-me session (Q8), a failed send must never break
+    the callback that just persisted the transition, and this app has no
+    per-instance status/toast Output to route the error into today - it
+    only ever reaches notify.send_message's own logger.warning. A future
+    pass can thread that error into the UI without touching call sites.
+    """
+    instance = workflow.get_instance(conn, instance_id)
+    step = workflow.get_step(conn, step_id)
+    if instance is None or step is None:
+        return
+    version = workflow.get_version(conn, version_id)
+    steps = version["steps"] if version else []
+    is_final = bool(steps) and steps[-1]["step_id"] == step_id  # steps come step_order-ordered - see workflow.get_version
+    notify.notify_step_change(instance, step, event, note, is_final_step=is_final)
 
 
 def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
@@ -36,11 +70,11 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         prevent_initial_call=True,
     )
     def switch_module(_clicks):
-        # Same remount-vs-click guard as edit_role/mark_current_step - see
-        # those for why: nothing here re-renders the nav buttons themselves,
-        # but Dash still fires this callback once at hydration with every
-        # n_clicks already at its initial 0, which must not be mistaken for
-        # a real click on module "0"/whichever sorts first.
+        # Same remount-vs-click ambiguity fixed for mark_current_step below:
+        # nothing here re-renders the nav buttons themselves, but Dash
+        # still fires this callback once at hydration with every n_clicks
+        # already at its initial 0, which must not be mistaken for a real
+        # click on module "0"/whichever sorts first.
         triggered = ctx.triggered_id
         if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
             return no_update, no_update, no_update, no_update
@@ -61,12 +95,44 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             selected_version_id = versions[0]["version_id"]
             selected_version = workflow.get_version(conn, selected_version_id)
             roles = workflow.list_roles(conn)
-            instances = workflow.list_instances(conn, selected_version_id)
-            content = layout.build_module_content(module_id, roles, versions, selected_version, instances)
+            instances = [workflow.get_or_create_instance(conn, selected_version_id)]
+            summary = workflow.step_status_summary(conn, selected_version_id)
+            content = layout.build_module_content(
+                module_id,
+                roles,
+                versions,
+                selected_version,
+                instances,
+                status_summary=summary,
+                history_by_instance=_history_by_instance(conn, instances),
+            )
         else:
             content = layout.build_module_content(module_id, [], [], None, [])
 
         return content, header, classnames, module_id
+
+    @app.callback(
+        Output("workflow-design-tab", "style"),
+        Output("workflow-instances-tab", "style"),
+        Output("workflow-tab-design-btn", "className"),
+        Output("workflow-tab-instances-btn", "className"),
+        Input("workflow-tab-design-btn", "n_clicks"),
+        Input("workflow-tab-instances-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def switch_workflow_tab(_design_clicks, _instances_clicks):
+        # Both tab bodies always exist in the DOM (see
+        # layout.build_designer_page's docstring) - switching tabs is just
+        # a style.display flip plus which tab button looks active, never a
+        # re-render, so it's instant and can't hit the Dash-validator
+        # "nonexistent Input" trap a conditionally-rendered tab would.
+        active = "instances" if ctx.triggered_id == "workflow-tab-instances-btn" else "design"
+        return (
+            layout.workflow_tab_container_style(visible=active == "design"),
+            layout.workflow_tab_container_style(visible=active == "instances"),
+            layout.workflow_tab_button_class("design", active),
+            layout.workflow_tab_button_class("instances", active),
+        )
 
     @app.callback(
         Output("version-bar-container", "children"),
@@ -74,74 +140,165 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         Output("fpa-steps-payload", "data-version-id"),
         Output("instance-list", "children", allow_duplicate=True),
         Output("workflow-steps-store", "data"),
+        Output("status-summary-content", "children", allow_duplicate=True),
+        Output("step-details-list", "children", allow_duplicate=True),
         Output("version-action-status", "children"),
         Output("new-version-name", "value"),
         Input("version-picker", "value"),
         Input("create-version-btn", "n_clicks"),
-        Input("activate-version-btn", "n_clicks"),
         State("new-version-name", "value"),
+        State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def switch_or_create_or_activate(selected_version_id, create_clicks, activate_clicks, new_name):
+    def switch_or_create(selected_version_id, create_clicks, new_name, expanded_history_instance_id):
         triggered = ctx.triggered_id
         status_msg = ""
         reset_name = no_update
 
         if triggered == "create-version-btn":
             if not create_clicks:
-                return (no_update,) * 7
+                return (no_update,) * 9
             name = (new_name or "").strip() or DEFAULT_VERSION_NAME
             selected_version_id = workflow.create_version(conn, name)
             status_msg = f"«{name}» به‌عنوان یک پیش‌نویس جدید ایجاد شد."
             reset_name = ""
-        elif triggered == "activate-version-btn":
-            if not activate_clicks:
-                return (no_update,) * 7
-            if selected_version_id is None:
-                return (no_update,) * 7
-            workflow.activate_version(conn, selected_version_id)
-            status_msg = "فعال شد - همه‌ی نسخه‌های دیگر اکنون پیش‌نویس هستند."
         # else: triggered == "version-picker" -> plain switch, just re-render below.
 
-        versions, version, instances = _load_view(conn, selected_version_id)
+        versions, version, instances, summary = _load_view(conn, selected_version_id)
         steps = version["steps"] if version else []
         return (
             layout.build_version_bar(versions, version),
             layout.steps_json(steps),
             layout.canvas_render_token(version),
-            layout.build_instance_list(instances, steps),
-            [{"role_id": s["role_id"], "label": s["label"]} for s in steps],
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+            layout.steps_store_payload(steps),
+            layout.build_status_summary(summary),
+            layout.build_step_details_list(steps),
             status_msg,
             reset_name,
         )
+
+    @app.callback(
+        Output("version-picker", "options"),
+        Output("version-action-status", "children", allow_duplicate=True),
+        Output("last-import-hash", "data"),
+        Input("import-version-upload", "contents"),
+        State("import-version-upload", "filename"),
+        State("last-import-hash", "data"),
+        prevent_initial_call=True,
+    )
+    def import_version(contents, _filename, last_hash):
+        # Only ever touches version-picker's *options* (adds the new
+        # version to the list), never its *value* or the surrounding
+        # version-bar-container - found live: rebuilding the whole
+        # container recreates the Dropdown as a new element, which Dash
+        # treats as a value change even though the value is numerically
+        # identical, which cascades into switch_or_create_or_activate
+        # (version-picker.value is its Input) - and that callback, seeing
+        # a plain "switch" (not create/activate), always sets
+        # version-action-status back to "", silently blanking the message
+        # this callback had just set. Leaving version-picker's *value*
+        # untouched - only ever adding to *options* - never triggers that
+        # cascade in the first place.
+        if not contents:
+            return no_update, no_update, no_update
+        # dcc.Upload's `contents` fires this callback more than once for a
+        # *single* real file selection (confirmed live: 3 update-component
+        # round-trips, 3 versions imported, from one upload) - contents
+        # itself can't be reset to break the repeat because it's this same
+        # callback's own Input (Dash rejects an Output on the exact prop a
+        # callback also reads as Input). Deduping by content hash against
+        # the last one actually processed is what stops the same file
+        # being imported 2-3 times over.
+        content_hash = hashlib.sha256(contents.encode("utf-8")).hexdigest()
+        if content_hash == last_hash:
+            return no_update, no_update, no_update
+        try:
+            _header, b64data = contents.split(",", 1)
+            raw = base64.b64decode(b64data).decode("utf-8")
+            payload = json.loads(raw)
+        except Exception:
+            return no_update, "فایل JSON نامعتبر است یا خوانده نشد.", content_hash
+
+        new_version_id, skipped_roles = workflow.import_version_json(conn, payload)
+        imported = workflow.get_version(conn, new_version_id)
+        msg = f"«{imported['name']}» به‌عنوان یک نسخه‌ی جدید وارد شد — از فهرست نسخه‌ها انتخابش کنید."
+        if skipped_roles:
+            msg += f" (این نقش‌ها در فایل بودند ولی در این پایگاه‌داده نیستند، پس ردشدند: {', '.join(skipped_roles)})"
+
+        versions = workflow.list_versions(conn)
+        return layout.version_options(versions), msg, content_hash
+
+    @app.callback(
+        Output("version-export-download", "data"),
+        Input("export-version-btn", "n_clicks"),
+        State("version-picker", "value"),
+        prevent_initial_call=True,
+    )
+    def export_version(n_clicks, version_id):
+        if not n_clicks or version_id is None:
+            return no_update
+        version = workflow.get_version(conn, version_id)
+        if version is None:
+            return no_update
+        payload_str = workflow.export_version_json(conn, version_id)
+        return dcc.send_string(payload_str, filename=f"{version['name']}.json")
 
     @app.callback(
         Output("fpa-steps-payload", "data-steps", allow_duplicate=True),
         Output("fpa-steps-payload", "data-version-id", allow_duplicate=True),
         Output("instance-list", "children", allow_duplicate=True),
         Output("workflow-steps-store", "data", allow_duplicate=True),
+        Output("status-summary-content", "children", allow_duplicate=True),
+        Output("step-details-list", "children", allow_duplicate=True),
         Output("save-steps-status", "children"),
         Input("save-steps-btn", "n_clicks"),
         State("version-picker", "value"),
         State("workflow-steps-store", "data"),
+        State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def save_steps(n_clicks, version_id, steps_data):
+    def save_steps(n_clicks, version_id, steps_data, expanded_history_instance_id):
         if not n_clicks:
-            return no_update, no_update, no_update, no_update, no_update
+            return (no_update,) * 7
         if version_id is None:
-            return no_update, no_update, no_update, no_update, "اول یک نسخه را انتخاب یا ایجاد کنید."
+            return no_update, no_update, no_update, no_update, no_update, no_update, "اول یک نسخه را انتخاب یا ایجاد کنید."
+
+        # Peek at whether this version's run already had a real current step
+        # *before* saving - if not, and this save is what gives it one (its
+        # own creation, right here, or steps landing on a version whose run
+        # was still parked at nothing), that's the moment to send the same
+        # "handed to them" notification create_instance used to send on
+        # manual creation. See workflow.get_or_create_instance/save_steps.
+        instance_before = workflow.get_or_create_instance(conn, version_id)
+        had_current_step = bool(instance_before["current_step_id"])
 
         workflow.save_steps(conn, version_id, steps_data or [])
 
         version = workflow.get_version(conn, version_id)
-        instances = workflow.list_instances(conn, version_id)
+        instance = workflow.get_or_create_instance(conn, version_id)
+        if not had_current_step and instance["current_step_id"]:
+            _notify_step_change(conn, instance["instance_id"], version_id, instance["current_step_id"], "advance")
+        instances = [instance]
+        summary = workflow.step_status_summary(conn, version_id)
         steps = version["steps"] if version else []
         return (
             layout.steps_json(steps),
             layout.canvas_render_token(version),
-            layout.build_instance_list(instances, steps),
-            [{"role_id": s["role_id"], "label": s["label"]} for s in steps],
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+            layout.steps_store_payload(steps),
+            layout.build_status_summary(summary),
+            layout.build_step_details_list(steps),
             f"ذخیره شد — {len(steps)} مرحله.",
         )
 
@@ -174,14 +331,18 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
     @app.callback(
         Output("role-palette", "children", allow_duplicate=True),
         Output("editing-role-id", "data"),
+        Output("status-summary-content", "children", allow_duplicate=True),
         Input({"type": "role-chip-label", "role_id": ALL}, "n_clicks"),
         Input({"type": "role-name-input", "role_id": ALL}, "n_submit"),
         Input({"type": "role-name-save", "role_id": ALL}, "n_clicks"),
         Input({"type": "role-name-cancel", "role_id": ALL}, "n_clicks"),
         State({"type": "role-name-input", "role_id": ALL}, "value"),
+        State({"type": "role-assignee-name-input", "role_id": ALL}, "value"),
+        State({"type": "role-assignee-email-input", "role_id": ALL}, "value"),
+        State("version-picker", "value"),
         prevent_initial_call=True,
     )
-    def edit_role(_label_clicks, _submits, _save_clicks, _cancel_clicks, input_values):
+    def edit_role(_label_clicks, _submits, _save_clicks, _cancel_clicks, name_values, assignee_name_values, assignee_email_values, version_id):
         # Same remount-vs-click ambiguity fixed for mark_current_step below:
         # this callback's own Output (role-palette) contains every id it
         # listens on, so re-rendering the palette for *any* reason (e.g.
@@ -190,46 +351,83 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         # with both a real id and a truthy value.
         triggered = ctx.triggered_id
         if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         role_id = triggered["role_id"]
+        summary_update = no_update
         if triggered["type"] == "role-chip-label":
             editing_role_id = role_id
         elif triggered["type"] == "role-name-cancel":
             editing_role_id = None
-        else:  # "role-name-save" click, or Enter (n_submit) inside the input
-            new_name = (input_values[0] if input_values else "").strip()
+        else:  # "role-name-save" click, or Enter (n_submit) in the name field
+            new_name = (name_values[0] if name_values else "").strip()
+            assignee_name = (assignee_name_values[0] if assignee_name_values else "").strip()
+            assignee_email = (assignee_email_values[0] if assignee_email_values else "").strip()
             if new_name:
-                workflow.rename_role(conn, role_id, new_name)
+                workflow.update_role_details(conn, role_id, new_name, assignee_name, assignee_email)
+                # assignee_name feeds the status-summary tiles too - only
+                # worth recomputing if a version is actually selected.
+                if version_id is not None:
+                    summary_update = layout.build_status_summary(workflow.step_status_summary(conn, version_id))
             editing_role_id = None
 
         roles = workflow.list_roles(conn)
-        return layout.build_role_palette(roles, editing_role_id=editing_role_id), editing_role_id
+        return layout.build_role_palette(roles, editing_role_id=editing_role_id), editing_role_id, summary_update
 
     @app.callback(
-        Output("instance-list", "children", allow_duplicate=True),
-        Output("create-instance-status", "children"),
-        Output("new-instance-name", "value"),
-        Input("create-instance-btn", "n_clicks"),
-        State("version-picker", "value"),
-        State("new-instance-name", "value"),
+        Output("delete-role-confirm", "displayed"),
+        Output("delete-role-confirm", "message"),
+        Output("pending-delete-role-id", "data"),
+        Output("add-role-status", "children", allow_duplicate=True),
+        Input({"type": "role-delete-btn", "role_id": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
-    def create_instance(n_clicks, version_id, name):
-        if not n_clicks:
-            return no_update, no_update, no_update
-        if version_id is None:
-            return no_update, "اول یک نسخه را انتخاب یا ایجاد کنید.", no_update
-        name = (name or "").strip()
-        if not name:
-            return no_update, "نام نمونه را وارد کنید.", no_update
+    def ask_delete_role(_clicks):
+        # Same "ask via native confirm, delete only on submit" shape as
+        # ask_delete_instance - a role delete is destructive and, unlike a
+        # rename, has no undo.
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update, no_update, no_update, no_update
 
-        workflow.create_instance(conn, version_id, name)
+        role_id = triggered["role_id"]
+        roles = workflow.list_roles(conn)
+        match = next((r for r in roles if r["role_id"] == role_id), None)
+        name = match["role_name"] if match else ""
+        usage = workflow.role_step_usage_count(conn, role_id)
+        if usage:
+            # Not actually a yes/no question, so skip the native confirm
+            # dialog entirely here (an OK/Cancel pair reads oddly on a
+            # notice, not a question) - just report why straight on the
+            # page. confirm_delete_role still re-checks usage on its own
+            # before ever deleting, so this early message is only ever a
+            # convenience, never the sole guard.
+            return (
+                False,
+                no_update,
+                None,
+                f"«{name}» در {usage} مرحله از گردش‌کارهای موجود استفاده شده و قابل حذف نیست.",
+            )
+        return True, f"نقش «{name}» حذف شود؟ این کار قابل بازگشت نیست.", role_id, no_update
 
-        version = workflow.get_version(conn, version_id)
-        instances = workflow.list_instances(conn, version_id)
-        steps = version["steps"] if version else []
-        return layout.build_instance_list(instances, steps), f"«{name}» ایجاد شد.", ""
+    @app.callback(
+        Output("role-palette", "children", allow_duplicate=True),
+        Output("add-role-status", "children", allow_duplicate=True),
+        Output("delete-role-confirm", "displayed", allow_duplicate=True),
+        Input("delete-role-confirm", "submit_n_clicks"),
+        State("pending-delete-role-id", "data"),
+        prevent_initial_call=True,
+    )
+    def confirm_delete_role(_submit_clicks, pending_role_id):
+        if not pending_role_id:
+            return no_update, no_update, False
+        # Re-check usage right before deleting (see ask_delete_role) instead
+        # of trusting the count from when the dialog opened.
+        if workflow.role_step_usage_count(conn, pending_role_id):
+            return no_update, "این نقش دیگر قابل حذف نیست - در یکی از مراحل استفاده شده.", False
+        workflow.delete_role(conn, pending_role_id)
+        roles = workflow.list_roles(conn)
+        return layout.build_role_palette(roles), "نقش حذف شد.", False
 
     @app.callback(
         Output("instance-list", "children", allow_duplicate=True),
@@ -240,9 +438,10 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         Input({"type": "instance-name-cancel", "instance_id": ALL}, "n_clicks"),
         State({"type": "instance-name-input", "instance_id": ALL}, "value"),
         State("version-picker", "value"),
+        State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def edit_instance_name(_label_clicks, _submits, _save_clicks, _cancel_clicks, input_values, version_id):
+    def edit_instance_name(_label_clicks, _submits, _save_clicks, _cancel_clicks, input_values, version_id, expanded_history_instance_id):
         # Same remount-vs-click guard as edit_role - this callback's own
         # Output (instance-list) contains every id it listens on.
         triggered = ctx.triggered_id
@@ -261,57 +460,28 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             editing_instance_id = None
 
         version = workflow.get_version(conn, version_id) if version_id is not None else None
-        instances = workflow.list_instances(conn, version_id) if version_id is not None else []
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
         steps = version["steps"] if version else []
-        return layout.build_instance_list(instances, steps, editing_instance_id=editing_instance_id), editing_instance_id
-
-    @app.callback(
-        Output("delete-instance-confirm", "displayed"),
-        Output("delete-instance-confirm", "message"),
-        Output("pending-delete-instance-id", "data"),
-        Input({"type": "delete-instance-btn", "instance_id": ALL}, "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def ask_delete_instance(_clicks):
-        # Delete has no undo (unlike rename), so it always goes through this
-        # confirm step - the real delete only happens in
-        # confirm_delete_instance below, once the browser's native dialog
-        # comes back with a "submit".
-        triggered = ctx.triggered_id
-        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update, no_update, no_update
-
-        instance_id = triggered["instance_id"]
-        instances = workflow.list_instances(conn)
-        match = next((i for i in instances if i["instance_id"] == instance_id), None)
-        name = match["name"] if match else ""
-        return True, f"نمونه‌ی «{name}» حذف شود؟ این کار قابل بازگشت نیست.", instance_id
+        return (
+            layout.build_instance_list(
+                instances,
+                steps,
+                editing_instance_id=editing_instance_id,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+            editing_instance_id,
+        )
 
     @app.callback(
         Output("instance-list", "children", allow_duplicate=True),
-        Output("delete-instance-confirm", "displayed", allow_duplicate=True),
-        Input("delete-instance-confirm", "submit_n_clicks"),
-        State("pending-delete-instance-id", "data"),
-        State("version-picker", "value"),
-        prevent_initial_call=True,
-    )
-    def confirm_delete_instance(_submit_clicks, pending_instance_id, version_id):
-        if not pending_instance_id:
-            return no_update, False
-        workflow.delete_instance(conn, pending_instance_id)
-
-        version = workflow.get_version(conn, version_id) if version_id is not None else None
-        instances = workflow.list_instances(conn, version_id) if version_id is not None else []
-        steps = version["steps"] if version else []
-        return layout.build_instance_list(instances, steps), False
-
-    @app.callback(
-        Output("instance-list", "children", allow_duplicate=True),
+        Output("status-summary-content", "children", allow_duplicate=True),
         Input({"type": "set-current-step", "instance_id": ALL, "step_id": ALL}, "n_clicks"),
         State("version-picker", "value"),
+        State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def mark_current_step(_all_clicks, version_id):
+    def mark_current_step(_all_clicks, version_id, expanded_history_instance_id):
         # triggered_id is None when Dash fires this because the whole set of
         # pattern-matched pills was just replaced (e.g. instance-list
         # re-rendered by an unrelated callback), not because one was really
@@ -319,15 +489,323 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         # button callbacks. Only a genuine single click gives a real id here.
         triggered = ctx.triggered_id
         if triggered is None:
-            return no_update
+            return no_update, no_update
         if not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update
-        workflow.set_current_step(conn, triggered["instance_id"], triggered["step_id"])
+            return no_update, no_update
+        action = workflow.set_current_step(conn, triggered["instance_id"], triggered["step_id"])
+        _notify_step_change(conn, triggered["instance_id"], version_id, triggered["step_id"], action)
 
         version = workflow.get_version(conn, version_id) if version_id is not None else None
-        instances = workflow.list_instances(conn, version_id) if version_id is not None else []
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
         steps = version["steps"] if version else []
-        return layout.build_instance_list(instances, steps)
+        return (
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+            layout.build_status_summary(summary),
+        )
+
+    @app.callback(
+        Output("instance-list", "children", allow_duplicate=True),
+        Output("status-summary-content", "children", allow_duplicate=True),
+        Input({"type": "skip-step-btn", "instance_id": ALL}, "n_clicks"),
+        State("version-picker", "value"),
+        State("expanded-history-instance-id", "data"),
+        prevent_initial_call=True,
+    )
+    def skip_step(_clicks, version_id, expanded_history_instance_id):
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update, no_update
+        # A no-op (False) if the step wasn't actually optional or there's no
+        # next step - the button that triggers this is only ever rendered
+        # when workflow_step.is_optional is true (see
+        # layout.build_instance_row), so this should never realistically
+        # fail in normal use; nothing more to surface if it does.
+        new_step_id = workflow.skip_current_step(conn, triggered["instance_id"])
+        if new_step_id:
+            _notify_step_change(conn, triggered["instance_id"], version_id, new_step_id, "skip")
+
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
+        steps = version["steps"] if version else []
+        return (
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+            layout.build_status_summary(summary),
+        )
+
+    @app.callback(
+        Output("instance-list", "children", allow_duplicate=True),
+        Input({"type": "instance-note-save-btn", "instance_id": ALL}, "n_clicks"),
+        State({"type": "instance-note-input", "instance_id": ALL}, "value"),
+        State("version-picker", "value"),
+        State("expanded-history-instance-id", "data"),
+        prevent_initial_call=True,
+    )
+    def add_instance_note(_clicks, input_values, version_id, expanded_history_instance_id):
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update
+        instance_id = triggered["instance_id"]
+        note = (input_values[0] if input_values else "").strip()
+        if note:
+            history = workflow.list_instance_history(conn, instance_id)
+            if history:  # attaches to the most recent transition - see workflow.list_instance_history (DESC order)
+                workflow.add_history_note(conn, history[0]["history_id"], note)
+
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        steps = version["steps"] if version else []
+        # The note input this click came from only exists while this
+        # instance's history is expanded - keep it expanded so the just-
+        # added note is immediately visible instead of the panel collapsing
+        # back to a bare toggle right after a successful save.
+        return layout.build_instance_list(
+            instances,
+            steps,
+            history_by_instance=_history_by_instance(conn, instances),
+            expanded_history_instance_id=expanded_history_instance_id,
+        )
+
+    @app.callback(
+        Output("instance-list", "children", allow_duplicate=True),
+        Output("expanded-history-instance-id", "data"),
+        Input({"type": "history-toggle-btn", "instance_id": ALL}, "n_clicks"),
+        State("expanded-history-instance-id", "data"),
+        State("version-picker", "value"),
+        prevent_initial_call=True,
+    )
+    def toggle_instance_history(_clicks, expanded_history_instance_id, version_id):
+        # Same remount-vs-click guard as edit_role/edit_instance_name - this
+        # callback's own Output (instance-list) contains every toggle button
+        # it listens on.
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update, no_update
+
+        instance_id = triggered["instance_id"]
+        # An accordion, not independent checkboxes: clicking the instance
+        # that's already open closes it, clicking a different one switches
+        # to it - at most one instance's history is expanded at a time,
+        # which is what keeps a page with many instances scannable.
+        new_expanded = None if instance_id == expanded_history_instance_id else instance_id
+
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        steps = version["steps"] if version else []
+        return (
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=new_expanded,
+            ),
+            new_expanded,
+        )
+
+    @app.callback(
+        Output("step-detail-backdrop", "style"),
+        Output("step-detail-title", "children"),
+        Output("step-detail-owner-input", "value"),
+        Output("step-detail-duty-input", "value"),
+        Output("step-detail-input-input", "value"),
+        Output("step-detail-output-input", "value"),
+        Output("step-detail-acceptance-criteria-input", "value"),
+        Output("step-detail-notification-subject-input", "value"),
+        Output("step-detail-sla-input", "value"),
+        Output("step-detail-optional-checkbox", "value"),
+        Output("step-detail-template-current", "children"),
+        Output("step-detail-template-actions", "style"),
+        Output("editing-step-detail-id", "data"),
+        Output("step-detail-save-status", "children"),
+        Input({"type": "step-detail-btn", "step_id": ALL}, "n_clicks"),
+        Input("step-detail-close-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_or_close_step_detail(_open_clicks, _close_clicks):
+        # Deliberately does NOT also listen on step-detail-save-btn: that
+        # button's own callback (save_step_detail, below) needs to read
+        # editing-step-detail-id as State to know *which* step to persist -
+        # if this callback also fired on the same click and cleared that
+        # store, the two would race to decide the store's value before
+        # save_step_detail ever reads it. Splitting "which step is open"
+        # from "commit this step's fields" so each store is only ever
+        # written by one trigger avoids that entirely.
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return (no_update,) * 14
+
+        if triggered == "step-detail-close-btn":
+            result = [no_update] * 14
+            result[0] = layout.step_detail_backdrop_style(hidden=True)
+            result[12] = None
+            return tuple(result)
+
+        step_id = triggered["step_id"]
+        step = workflow.get_step(conn, step_id)
+        if step is None:
+            return (no_update,) * 14
+        current_text, actions_style = layout.step_template_status(step)
+        return (
+            layout.step_detail_backdrop_style(hidden=False),
+            step["label"],
+            step["owner"] or "",
+            step["duty"] or "",
+            step["input_desc"] or "",
+            step["output_desc"] or "",
+            step["acceptance_criteria"] or "",
+            step["notification_subject"] or "",
+            step["sla_days"],
+            ["optional"] if step["is_optional"] else [],
+            current_text,
+            actions_style,
+            step_id,
+            "",
+        )
+
+    @app.callback(
+        Output("step-detail-backdrop", "style", allow_duplicate=True),
+        Output("editing-step-detail-id", "data", allow_duplicate=True),
+        Output("step-details-list", "children", allow_duplicate=True),
+        Output("status-summary-content", "children", allow_duplicate=True),
+        Output("instance-list", "children", allow_duplicate=True),
+        Input("step-detail-save-btn", "n_clicks"),
+        State("editing-step-detail-id", "data"),
+        State("step-detail-owner-input", "value"),
+        State("step-detail-duty-input", "value"),
+        State("step-detail-input-input", "value"),
+        State("step-detail-output-input", "value"),
+        State("step-detail-acceptance-criteria-input", "value"),
+        State("step-detail-notification-subject-input", "value"),
+        State("step-detail-sla-input", "value"),
+        State("step-detail-optional-checkbox", "value"),
+        State("version-picker", "value"),
+        State("expanded-history-instance-id", "data"),
+        prevent_initial_call=True,
+    )
+    def save_step_detail(
+        n_clicks,
+        step_id,
+        owner,
+        duty,
+        input_desc,
+        output_desc,
+        acceptance_criteria,
+        notification_subject,
+        sla_days,
+        optional_value,
+        version_id,
+        expanded_history_instance_id,
+    ):
+        if not n_clicks or step_id is None:
+            return (no_update,) * 5
+        sla_days_int = int(sla_days) if sla_days not in (None, "") else None
+        workflow.update_step_details(
+            conn,
+            step_id,
+            owner,
+            duty,
+            input_desc,
+            output_desc,
+            acceptance_criteria,
+            sla_days_int,
+            "optional" in (optional_value or []),
+            notification_subject,
+        )
+
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        steps = version["steps"] if version else []
+        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
+        return (
+            layout.step_detail_backdrop_style(hidden=True),
+            None,
+            layout.build_step_details_list(steps),
+            layout.build_status_summary(summary),
+            layout.build_instance_list(
+                instances,
+                steps,
+                history_by_instance=_history_by_instance(conn, instances),
+                expanded_history_instance_id=expanded_history_instance_id,
+            ),
+        )
+
+    @app.callback(
+        Output("step-detail-template-current", "children", allow_duplicate=True),
+        Output("step-detail-template-actions", "style", allow_duplicate=True),
+        Output("step-details-list", "children", allow_duplicate=True),
+        Output("last-template-upload-hash", "data"),
+        Input("step-detail-template-upload", "contents"),
+        State("step-detail-template-upload", "filename"),
+        State("editing-step-detail-id", "data"),
+        State("version-picker", "value"),
+        State("last-template-upload-hash", "data"),
+        prevent_initial_call=True,
+    )
+    def upload_step_template(contents, filename, step_id, version_id, last_hash):
+        if not contents or step_id is None:
+            return no_update, no_update, no_update, no_update
+        # Same dcc.Upload multi-fire quirk import_version's docstring
+        # explains - dedup by (step_id, content) so one real upload can't
+        # write and re-write the file 2-3 times over.
+        content_hash = hashlib.sha256(f"{step_id}:{contents}".encode("utf-8")).hexdigest()
+        if content_hash == last_hash:
+            return no_update, no_update, no_update, no_update
+        _header, b64data = contents.split(",", 1)
+        raw_bytes = base64.b64decode(b64data)
+        workflow.save_step_template(conn, step_id, filename or "template", raw_bytes)
+
+        step = workflow.get_step(conn, step_id)
+        current_text, actions_style = layout.step_template_status(step)
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        steps = version["steps"] if version else []
+        return current_text, actions_style, layout.build_step_details_list(steps), content_hash
+
+    @app.callback(
+        Output("step-detail-template-current", "children", allow_duplicate=True),
+        Output("step-detail-template-actions", "style", allow_duplicate=True),
+        Output("step-details-list", "children", allow_duplicate=True),
+        Input("step-detail-template-clear-btn", "n_clicks"),
+        State("editing-step-detail-id", "data"),
+        State("version-picker", "value"),
+        prevent_initial_call=True,
+    )
+    def clear_step_template(n_clicks, step_id, version_id):
+        if not n_clicks or step_id is None:
+            return no_update, no_update, no_update
+        workflow.clear_step_template(conn, step_id)
+
+        current_text, actions_style = layout.step_template_status(None)
+        version = workflow.get_version(conn, version_id) if version_id is not None else None
+        steps = version["steps"] if version else []
+        return current_text, actions_style, layout.build_step_details_list(steps)
+
+    @app.callback(
+        Output("step-detail-download", "data"),
+        Input("step-detail-template-download-btn", "n_clicks"),
+        State("editing-step-detail-id", "data"),
+        prevent_initial_call=True,
+    )
+    def download_step_template(n_clicks, step_id):
+        if not n_clicks or step_id is None:
+            return no_update
+        step = workflow.get_step(conn, step_id)
+        if not step or not step.get("template_path"):
+            return no_update
+        full_path = config.PROJECT_ROOT / step["template_path"]
+        if not full_path.exists():
+            return no_update
+        return dcc.send_file(str(full_path), filename=step["template_original_name"])
 
     @app.callback(
         Output("mirror-sync-status", "children"),

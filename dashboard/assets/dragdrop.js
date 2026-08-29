@@ -23,11 +23,22 @@
 
   window.__fpaSteps = window.__fpaSteps || [];
   window.__fpaLoadedToken = window.__fpaLoadedToken || null;
+  window.__fpaHistory = window.__fpaHistory || [];
   var __fpaKeyCounter = 0;
+  var FPA_HISTORY_LIMIT = 20;
 
   function newKey() {
     __fpaKeyCounter += 1;
     return "new_" + __fpaKeyCounter + "_" + Date.now();
+  }
+
+  // Undo support: a snapshot pushed right before each mutation (add,
+  // remove, reorder), never after - see the click/drop handlers below.
+  // Deep-copied (not a reference) so later mutations to __fpaSteps can
+  // never retroactively change an already-pushed snapshot.
+  function pushHistory() {
+    window.__fpaHistory.push(JSON.parse(JSON.stringify(window.__fpaSteps)));
+    if (window.__fpaHistory.length > FPA_HISTORY_LIMIT) window.__fpaHistory.shift();
   }
 
   function escapeHtml(s) {
@@ -46,6 +57,11 @@
     if (token === window.__fpaLoadedToken) return;
 
     window.__fpaLoadedToken = token;
+    // A server-driven change (version switch, Save, etc.) invalidates
+    // whatever local undo history there was - those snapshots refer to
+    // step keys/positions from a canvas that no longer exists once the
+    // server has replaced it.
+    window.__fpaHistory = [];
     var raw = payload.getAttribute("data-steps") || "[]";
     var parsed;
     try {
@@ -66,8 +82,13 @@
   }
 
   function chipHtml(step, index) {
+    // Mirrors layout.build_canvas_children's markup exactly (neutral card +
+    // --role-color custom property + .fpa-role-badge showing the role's
+    // initial) - the two must never drift apart, since this is what
+    // repaints the canvas on every client-side drag/reorder between saves.
+    var badgeInitial = (step.role_name || step.label || "").slice(0, 1);
     return (
-      '<div class="fpa-chip" draggable="true" style="background:' +
+      '<div class="fpa-chip" draggable="true" style="--role-color:' +
       escapeHtml(step.color_hex) +
       '" data-key="' +
       escapeHtml(step.key) +
@@ -81,6 +102,7 @@
       escapeHtml(step.label) +
       '">' +
       '<span class="fpa-step-index">' + (index + 1) + "</span>" +
+      '<span class="fpa-role-badge">' + escapeHtml(badgeInitial) + "</span>" +
       "<span>" + escapeHtml(step.label) + "</span>" +
       '<button type="button" class="fpa-remove" data-key="' + escapeHtml(step.key) + '" title="حذف مرحله">×</button>' +
       "</div>"
@@ -105,8 +127,13 @@
 
   function pushToStore() {
     if (!(window.dash_clientside && window.dash_clientside.set_props)) return;
+    // `key` rides along so Python's save_steps can tell "this chip is
+    // still the same step it was before" (key "s<id>") from "this is a
+    // brand-new chip" (key "new_...") - that's what lets a saved step's
+    // owner/duty/template survive a re-save instead of being wiped every
+    // time the canvas changes. See workflow.save_steps.
     var payload = window.__fpaSteps.map(function (s) {
-      return { role_id: s.role_id, label: s.label };
+      return { role_id: s.role_id, label: s.label, key: s.key };
     });
     window.dash_clientside.set_props("workflow-steps-store", { data: payload });
   }
@@ -209,13 +236,17 @@
     if (trash) {
       if (data.source === "canvas") {
         var idx = keyIndex(data.key);
-        if (idx !== -1) window.__fpaSteps.splice(idx, 1);
-        commit();
+        if (idx !== -1) {
+          pushHistory();
+          window.__fpaSteps.splice(idx, 1);
+          commit();
+        }
       }
       return;
     }
 
     if (data.source === "palette") {
+      pushHistory();
       var insertAt = dropIndexForX(e.clientX, null);
       window.__fpaSteps.splice(insertAt, 0, {
         key: newKey(),
@@ -228,6 +259,7 @@
     } else if (data.source === "canvas") {
       var fromIndex = keyIndex(data.key);
       if (fromIndex === -1) return;
+      pushHistory();
       var target = dropIndexForX(e.clientX, data.key);
       var moved = window.__fpaSteps.splice(fromIndex, 1)[0];
       if (target > fromIndex) target -= 1;
@@ -237,24 +269,51 @@
   });
 
   document.addEventListener("click", function (e) {
+    var undoBtn = e.target.closest ? e.target.closest("#fpa-undo-btn") : null;
+    if (undoBtn) {
+      // Pure client-side, like the rest of the canvas - nothing here is
+      // persisted until "ذخیره‌ی تغییرات" is clicked, so undo is just
+      // "restore the previous in-memory snapshot," no server round-trip.
+      if (window.__fpaHistory.length > 0) {
+        window.__fpaSteps = window.__fpaHistory.pop();
+        commit();
+      }
+      return;
+    }
+
     var removeBtn = e.target.closest ? e.target.closest(".fpa-remove") : null;
     if (!removeBtn) return;
     var key = removeBtn.getAttribute("data-key");
     var idx = keyIndex(key);
-    if (idx !== -1) window.__fpaSteps.splice(idx, 1);
-    commit();
+    if (idx !== -1) {
+      pushHistory();
+      window.__fpaSteps.splice(idx, 1);
+      commit();
+    }
   });
 
   function boot() {
     syncFromServerIfNeeded();
-    var payload = document.getElementById("fpa-steps-payload");
-    if (payload) {
-      new MutationObserver(syncFromServerIfNeeded).observe(payload, {
+    var root = document.getElementById("fpa-app-root");
+    if (root) {
+      // Observes #fpa-app-root (subtree: true), not #fpa-steps-payload
+      // itself, on purpose: switching sidebar modules away from "workflow"
+      // and back makes React unmount and recreate the whole page-content
+      // subtree, including a brand-new #fpa-steps-payload node - an
+      // observer bound to the old node would silently stop firing forever
+      // once that node's gone, since detaching it isn't itself a tracked
+      // mutation. A subtree observer on the one div that's never replaced
+      // catches the new node's attributes too;
+      // syncFromServerIfNeeded() already re-queries the element fresh by
+      // id on every call, so it doesn't care which node the mutation
+      // report came from.
+      new MutationObserver(syncFromServerIfNeeded).observe(root, {
         attributes: true,
         attributeFilter: ["data-version-id", "data-steps"],
+        subtree: true,
       });
     } else {
-      // Payload not mounted yet (Dash still hydrating) - retry shortly.
+      // Root not mounted yet (Dash still hydrating) - retry shortly.
       setTimeout(boot, 150);
     }
   }
