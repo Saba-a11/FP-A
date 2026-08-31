@@ -29,6 +29,14 @@ def run_seed(db_path=None) -> duckdb.DuckDBPyConnection:
     retranslate_seeded_role_names(conn)
     unfreeze_default_step_labels(conn)
     migrate_eligibility_to_acceptance_criteria(conn)
+    backfill_instance_step_states(conn)
+
+    # Everything above is schema DDL and one-time migrations, and DuckDB
+    # cannot replay that kind of WAL entry after an abrupt exit - the
+    # database becomes unopenable. Flush it into the file now, while we
+    # still can, rather than leaving the whole session exposed. See
+    # db.checkpoint for the reproduction.
+    db.checkpoint(conn)
 
     return conn
 
@@ -94,6 +102,46 @@ def migrate_eligibility_to_acceptance_criteria(conn: duckdb.DuckDBPyConnection) 
     )
     conn.execute("ALTER TABLE workflow_step DROP COLUMN eligibility")
     print("Migrated workflow_step.eligibility -> acceptance_criteria and dropped the old column")
+
+
+# Progress used to live in a single workflow_instance.current_step_id
+# pointer; it now lives one row per (instance, step) in
+# workflow_instance_step_state, so a stage can hold several parallel steps
+# (see sql/schema.sql). An already-running database has instances with a
+# pointer but no state rows - this translates the pointer once: everything
+# in a stage *before* the pointer's stage counts as already approved,
+# everything from that stage on stays pending. Only touches instances that
+# have no state rows at all, so it's a no-op on every startup after the
+# first and can never overwrite real progress.
+def backfill_instance_step_states(conn: duckdb.DuckDBPyConnection) -> None:
+    instances = conn.execute(
+        """
+        SELECT i.instance_id, i.version_id, i.current_step_id
+        FROM workflow_instance i
+        WHERE NOT EXISTS (
+            SELECT 1 FROM workflow_instance_step_state st WHERE st.instance_id = i.instance_id
+        )
+        """
+    ).fetchall()
+    if not instances:
+        return
+
+    for instance_id, version_id, current_step_id in instances:
+        steps = conn.execute(
+            "SELECT step_id, step_order FROM workflow_step WHERE version_id = ? ORDER BY step_order",
+            [version_id],
+        ).fetchall()
+        current_stage = next(
+            (stage for step_id, stage in steps if step_id == current_step_id),
+            None,
+        )
+        for step_id, stage in steps:
+            already_done = current_stage is not None and stage < current_stage
+            conn.execute(
+                "INSERT INTO workflow_instance_step_state (instance_id, step_id, state) VALUES (?, ?, ?)",
+                [instance_id, step_id, "approved" if already_done else "pending"],
+            )
+    print(f"Backfilled step states for {len(instances)} existing instance(s)")
 
 
 if __name__ == "__main__":

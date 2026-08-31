@@ -52,10 +52,53 @@ CARD_STYLE = {
 ROLE_COLOR_CYCLE = ["#0891b2", "#8b5cf6", "#ec4899", "#d97706", "#0f766e"]
 
 
-def build_role_palette(roles: list[dict], editing_role_id: int | None = None):
-    """`editing_role_id` swaps exactly one chip (if its role_id matches) into
-    an inline rename form instead of the normal draggable chip - see
-    callbacks.edit_role, which is the only thing that ever sets it.
+def build_role_palette(roles: list[dict]):
+    """Drag-only role chips for the designer page.
+
+    Deliberately carries no editing affordances any more: adding, renaming,
+    setting an assignee and deleting all live in the settings module now
+    (build_role_manager). This is a narrow left-hand column beside a canvas
+    that wants every pixel of width, so anything that is not "grab a role and
+    drop it on a stage" was moved out of it.
+    """
+    chips = []
+    for role in roles:
+        label_children = [html.Span(role["role_name"], className="fpa-role-chip-label")]
+        if role.get("assignee_name"):
+            label_children.append(
+                html.Div(
+                    role["assignee_name"],
+                    style={"fontSize": "10.5px", "color": "var(--fpa-text-secondary)", "fontWeight": "400"},
+                )
+            )
+        chips.append(
+            html.Div(
+                className="fpa-role-chip",
+                draggable="true",
+                style={"--role-color": role["color_hex"]},
+                **{
+                    "data-role-id": role["role_id"],
+                    "data-role-name": role["role_name"],
+                    "data-color": role["color_hex"],
+                },
+                children=[
+                    html.Span("⠿", className="fpa-drag-handle"),
+                    html.Span(role["role_name"][:1], className="fpa-role-badge"),
+                    html.Div(label_children),
+                ],
+            )
+        )
+    return chips
+
+
+def build_role_manager(roles: list[dict], editing_role_id: int | None = None):
+    """Full role administration for the settings module: add, rename, set who
+    holds the role, delete.
+
+    `editing_role_id` swaps exactly one row into an inline edit form - see
+    callbacks.edit_role, the only thing that ever sets it. Same pattern the
+    designer palette used to carry, moved here so the design canvas keeps its
+    width for the thing it is actually for.
     """
     input_style = {
         "width": "100%",
@@ -63,116 +106,128 @@ def build_role_palette(roles: list[dict], editing_role_id: int | None = None):
         "border": "1px solid var(--fpa-border)",
         "borderRadius": "6px",
         "color": "var(--fpa-text)",
-        "padding": "4px 8px",
+        "padding": "6px 9px",
         "fontSize": "12.5px",
     }
-    chips = []
+    rows = []
     for role in roles:
         if role["role_id"] == editing_role_id:
-            chips.append(
+            rows.append(
                 html.Div(
-                    className="fpa-role-chip fpa-role-chip-editing",
-                    style={
-                        "--role-color": role["color_hex"],
-                        "flexDirection": "column",
-                        "alignItems": "stretch",
-                        "gap": "6px",
-                    },
+                    className="fpa-role-manager-row fpa-role-manager-row-editing",
+                    style={"--role-color": role["color_hex"]},
                     children=[
-                        dcc.Input(
-                            id={"type": "role-name-input", "role_id": role["role_id"]},
-                            value=role["role_name"],
-                            type="text",
-                            placeholder="نام نقش",
-                            autoFocus=True,
-                            style=input_style,
-                        ),
-                        dcc.Input(
-                            id={"type": "role-assignee-name-input", "role_id": role["role_id"]},
-                            value=role.get("assignee_name") or "",
-                            type="text",
-                            placeholder="نام مسئول (اختیاری)",
-                            style=input_style,
-                        ),
-                        dcc.Input(
-                            id={"type": "role-assignee-email-input", "role_id": role["role_id"]},
-                            value=role.get("assignee_email") or "",
-                            type="email",
-                            placeholder="ایمیل مسئول (اختیاری)",
-                            style=input_style,
+                        html.Div(
+                            style={"display": "flex", "gap": "8px", "flexWrap": "wrap"},
+                            children=[
+                                dcc.Input(
+                                    id={"type": "role-name-input", "role_id": role["role_id"]},
+                                    value=role["role_name"],
+                                    type="text",
+                                    placeholder="نام نقش",
+                                    autoFocus=True,
+                                    style={**input_style, "flex": "1", "minWidth": "140px"},
+                                ),
+                                dcc.Input(
+                                    id={"type": "role-assignee-name-input", "role_id": role["role_id"]},
+                                    value=role.get("assignee_name") or "",
+                                    type="text",
+                                    placeholder="نام مسئول (اختیاری)",
+                                    style={**input_style, "flex": "1", "minWidth": "140px"},
+                                ),
+                                dcc.Input(
+                                    id={"type": "role-assignee-email-input", "role_id": role["role_id"]},
+                                    value=role.get("assignee_email") or "",
+                                    type="email",
+                                    placeholder="ایمیل مسئول (اختیاری)",
+                                    style={**input_style, "flex": "1", "minWidth": "160px", "direction": "ltr"},
+                                ),
+                            ],
                         ),
                         html.Div(
                             [
                                 html.Button(
-                                    "🗑",
+                                    "🗑 حذف نقش",
                                     id={"type": "role-delete-btn", "role_id": role["role_id"]},
                                     n_clicks=0,
-                                    className="fpa-chip-icon-btn fpa-btn-danger",
-                                    title="حذف این نقش",
+                                    className="fpa-btn-danger",
+                                    style={"fontSize": "11.5px", "padding": "5px 12px"},
                                 ),
                                 html.Div(style={"flex": "1"}),
                                 html.Button(
-                                    "✓",
+                                    "ذخیره",
                                     id={"type": "role-name-save", "role_id": role["role_id"]},
                                     n_clicks=0,
-                                    className="fpa-chip-icon-btn",
-                                    title="ذخیره",
+                                    style={"fontSize": "11.5px", "padding": "5px 14px"},
                                 ),
                                 html.Button(
-                                    "×",
+                                    "انصراف",
                                     id={"type": "role-name-cancel", "role_id": role["role_id"]},
                                     n_clicks=0,
-                                    className="fpa-chip-icon-btn",
-                                    title="انصراف",
+                                    className="fpa-btn-quiet",
+                                    style={"border": f"1px solid {BORDER}", "fontSize": "11.5px", "padding": "5px 14px"},
                                 ),
                             ],
-                            style={"display": "flex", "gap": "6px", "justifyContent": "flex-end", "alignItems": "center"},
+                            style={"display": "flex", "gap": "8px", "alignItems": "center", "marginTop": "10px"},
                         ),
                     ],
                 )
             )
         else:
-            label_children = [
-                html.Span(
-                    role["role_name"],
-                    id={"type": "role-chip-label", "role_id": role["role_id"]},
-                    n_clicks=0,
-                    className="fpa-role-chip-label",
-                    title="برای ویرایش نام و مسئول کلیک کنید",
-                )
-            ]
+            meta = []
             if role.get("assignee_name"):
-                label_children.append(
-                    html.Div(
-                        role["assignee_name"],
-                        style={"fontSize": "10.5px", "color": "var(--fpa-text-secondary)", "fontWeight": "400"},
-                    )
-                )
-            chips.append(
+                meta.append(role["assignee_name"])
+            if role.get("assignee_email"):
+                meta.append(role["assignee_email"])
+            rows.append(
                 html.Div(
-                    className="fpa-role-chip",
-                    draggable="true",
+                    className="fpa-role-manager-row",
                     style={"--role-color": role["color_hex"]},
-                    **{
-                        "data-role-id": role["role_id"],
-                        "data-role-name": role["role_name"],
-                        "data-color": role["color_hex"],
-                    },
                     children=[
-                        html.Span("⠿", className="fpa-drag-handle"),
                         html.Span(role["role_name"][:1], className="fpa-role-badge"),
-                        html.Div(label_children),
+                        html.Div(
+                            [
+                                html.Div(role["role_name"], style={"fontWeight": "700", "fontSize": "13px"}),
+                                html.Div(
+                                    " — ".join(meta) if meta else "مسئولی تعیین نشده",
+                                    style={
+                                        "fontSize": "11px",
+                                        "color": TEXT_SECONDARY if meta else TEXT_MUTED,
+                                        "marginTop": "2px",
+                                    },
+                                ),
+                            ],
+                            style={"flex": "1", "minWidth": "0"},
+                        ),
+                        html.Button(
+                            "ویرایش",
+                            id={"type": "role-chip-label", "role_id": role["role_id"]},
+                            n_clicks=0,
+                            className="fpa-btn-quiet",
+                            style={"border": f"1px solid {BORDER}", "fontSize": "11.5px", "padding": "4px 12px"},
+                        ),
                     ],
                 )
             )
-    return chips
+    return rows
 
 
-def build_canvas_children(steps: list[dict]):
-    """The chips shown inside #fpa-canvas for one version's step list.
-    `steps` items need: step_id, role_id, role_name, color_hex, label.
+def build_canvas_children(stages: list[list[dict]]):
+    """The columns shown inside #fpa-canvas for one version's step list.
+
+    `stages` is workflow.get_version()["stages"] - one inner list per stage,
+    where a stage holding more than one step is a set of parallel branches.
+    Every chip carries data-* attributes because dragdrop.js reads them back
+    off the DOM when a drag starts.
+
+    This markup must stay byte-for-byte equivalent to dragdrop.js's own
+    render()/stageHtml()/chipHtml(), which repaints this same node on every
+    client-side edit - the split-ownership rule (see build_steps_payload)
+    means Dash paints it once and the JS owns it from then on, so any drift
+    between the two shows up as the canvas visibly changing shape on the
+    first drag.
     """
-    if not steps:
+    if not stages:
         return html.Div(
             [
                 html.Div("+", className="fpa-plus"),
@@ -184,30 +239,76 @@ def build_canvas_children(steps: list[dict]):
             ],
             className="fpa-canvas-empty",
         )
-    children = []
-    for i, step in enumerate(steps):
-        if i > 0:
-            children.append(html.Span("→", className="fpa-arrow"))
-        children.append(
+
+    def gap(index: int):
+        return html.Div(
+            className="fpa-gap",
+            title="نقش را اینجا رها کنید تا یک مرحله‌ی جدید ساخته شود",
+            **{"data-gap": index},
+            children=[
+                html.Div(className="fpa-gap-line"),
+                html.Div("+", className="fpa-gap-badge"),
+                html.Div("مرحله‌ی جدید", className="fpa-gap-label"),
+                html.Div(className="fpa-gap-line"),
+            ],
+        )
+
+    children = [gap(0)]
+    for stage_index, stage in enumerate(stages):
+        is_parallel = len(stage) > 1
+        head_children = [html.Span(f"مرحله {stage_index + 1}", className="fpa-stage-num")]
+        if is_parallel:
+            head_children.append(
+                html.Span(f"همزمان · {len(stage)} نفر", className="fpa-stage-tag")
+            )
+
+        body_children = []
+        for step in stage:
+            body_children.append(
+                html.Div(
+                    className="fpa-chip",
+                    draggable="true",
+                    style={"--role-color": step["color_hex"]},
+                    **{
+                        "data-key": f"s{step['step_id']}",
+                        "data-role-id": step["role_id"],
+                        "data-role-name": step["role_name"],
+                        "data-color": step["color_hex"],
+                        "data-label": step["label"],
+                    },
+                    children=[
+                        html.Span((step["role_name"] or step["label"])[:1], className="fpa-role-badge"),
+                        html.Span(step["label"]),
+                        html.Button("×", className="fpa-remove", **{"data-key": f"s{step['step_id']}"}),
+                    ],
+                )
+            )
+        body_children.append(
             html.Div(
-                className="fpa-chip",
-                draggable="true",
-                style={"--role-color": step["color_hex"]},
-                **{
-                    "data-key": f"s{step['step_id']}",
-                    "data-role-id": step["role_id"],
-                    "data-role-name": step["role_name"],
-                    "data-color": step["color_hex"],
-                    "data-label": step["label"],
-                },
-                children=[
-                    html.Span(str(i + 1), className="fpa-step-index"),
-                    html.Span((step["role_name"] or step["label"])[:1], className="fpa-role-badge"),
-                    html.Span(step["label"]),
-                    html.Button("×", className="fpa-remove", **{"data-key": f"s{step['step_id']}"}),
+                [
+                    "+ افزودن نقش به این مرحله",
+                    html.Span("همزمان با بقیه", className="fpa-stage-drop-sub"),
                 ],
+                className="fpa-stage-drop",
             )
         )
+
+        stage_children = [
+            html.Div(head_children, className="fpa-stage-head"),
+            html.Div(body_children, className="fpa-stage-body"),
+        ]
+        if is_parallel:
+            stage_children.append(
+                html.Div(f"هر {len(stage)} نفر باید تایید کنند", className="fpa-stage-note")
+            )
+        children.append(
+            html.Div(
+                stage_children,
+                className="fpa-stage fpa-stage-parallel" if is_parallel else "fpa-stage",
+                **{"data-stage": stage_index},
+            )
+        )
+        children.append(gap(stage_index + 1))
     return children
 
 
@@ -342,68 +443,158 @@ def build_version_bar(versions: list[dict], selected_version: dict):
     )
 
 
+def step_state_badge(step: dict):
+    """The small status pill on one step in the progress track. Reads
+    instance_progress's annotation only - it never re-decides whose turn it
+    is, so the track can't disagree with the engine."""
+    if step["state"] == "approved":
+        text, color, bg = "✓ تایید شد", GOOD_COLOR, "var(--fpa-good-soft)"
+    elif step["state"] == "rejected":
+        text, color, bg = "↩ عدم تایید", CRITICAL_COLOR, "var(--fpa-critical-soft)"
+    elif step["is_actionable"]:
+        text, color, bg = "● در انتظار اقدام", ACCENT, "var(--fpa-hover-overlay)"
+    else:
+        text, color, bg = "— نوبت نرسیده", TEXT_MUTED, "transparent"
+    return html.Span(
+        text,
+        style={
+            "color": color,
+            "background": bg,
+            "border": f"1px solid {color}",
+            "borderRadius": "999px",
+            "padding": "2px 9px",
+            "fontSize": "10.5px",
+            "fontWeight": "700",
+            "whiteSpace": "nowrap",
+        },
+    )
+
+
+def build_track_step(instance_id: int, step: dict):
+    """One step inside one stage column of the progress track.
+
+    Approve/reject render *only* on a step that is actionable right now -
+    that is the whole of the "each person acts only on their own step, and
+    only when it reaches them" rule as far as the UI is concerned.
+    workflow.approve_step/reject_step enforce the same thing server-side, so
+    hiding a button is a convenience, never the actual guard.
+
+    Reject is additionally withheld on the first stage, which has nobody
+    behind it to send the work back to (reject_step refuses it too).
+    """
+    children = [
+        html.Div(
+            [
+                html.Span(step["label"], style={"fontWeight": "700", "fontSize": "12.5px"}),
+                step_state_badge(step),
+            ],
+            style={"display": "flex", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"},
+        )
+    ]
+    if step.get("assignee_name"):
+        children.append(
+            html.Div(step["assignee_name"], style={"fontSize": "11px", "color": TEXT_SECONDARY, "marginTop": "2px"})
+        )
+    if step["state"] == "rejected" and step.get("state_note"):
+        children.append(
+            html.Div(
+                f"« {step['state_note']} »",
+                style={"fontSize": "11px", "color": CRITICAL_COLOR, "marginTop": "4px"},
+            )
+        )
+
+    if step["is_actionable"]:
+        actions = [
+            html.Button(
+                "تایید و ارسال",
+                id={"type": "approve-step-btn", "instance_id": instance_id, "step_id": step["step_id"]},
+                n_clicks=0,
+                className="fpa-approve-btn",
+                title="تایید این مرحله و ارسال به مرحله‌ی بعد",
+            )
+        ]
+        if step["stage_index"] > 0:
+            actions.append(
+                html.Button(
+                    "عدم تایید",
+                    id={"type": "reject-step-btn", "instance_id": instance_id, "step_id": step["step_id"]},
+                    n_clicks=0,
+                    className="fpa-btn-danger fpa-reject-btn",
+                    title="بازگرداندن به مرحله‌ی قبل همراه با توضیح",
+                )
+            )
+        if step.get("is_optional"):
+            actions.append(
+                html.Button(
+                    "رد کردن",
+                    id={"type": "skip-step-btn", "instance_id": instance_id, "step_id": step["step_id"]},
+                    n_clicks=0,
+                    className="fpa-btn-quiet",
+                    style={"border": f"1px solid {BORDER}", "fontSize": "11px", "padding": "3px 9px"},
+                    title="این مرحله اختیاری است و می‌تواند رد شود",
+                )
+            )
+        children.append(
+            html.Div(actions, style={"display": "flex", "gap": "6px", "marginTop": "8px", "flexWrap": "wrap"})
+        )
+
+    css_class = "fpa-track-step"
+    if step["state"] == "approved":
+        css_class += " fpa-track-step-done"
+    elif step["state"] == "rejected":
+        css_class += " fpa-track-step-rejected"
+    elif step["is_actionable"]:
+        css_class += " fpa-track-step-active"
+    return html.Div(children, className=css_class, style={"--role-color": step["color_hex"]})
+
+
 def build_instance_row(
     instance: dict,
-    steps: list[dict],
+    progress: dict,
     editing_instance_id: int | None = None,
     history: list[dict] | None = None,
     expanded_history_instance_id: int | None = None,
 ):
-    current_step_id = instance["current_step_id"]
-    current_index = None
-    current_step = None
-    for i, s in enumerate(steps):
-        if s["step_id"] == current_step_id:
-            current_index = i
-            current_step = s
-            break
+    """One workflow's live progress: stage columns, who can act, history.
+
+    `progress` is workflow.instance_progress's return - the single read
+    model. Nothing here recomputes whose turn it is.
+    """
+    stages = progress["stages"]
+    instance_id = instance["instance_id"]
 
     track_children = []
-    for i, s in enumerate(steps):
-        if i > 0:
+    for stage_index, stage in enumerate(stages):
+        if stage_index > 0:
             connector_class = "fpa-track-connector"
-            if current_index is not None and i <= current_index:
+            if progress["stage_complete"][stage_index - 1]:
                 connector_class += " fpa-connector-done"
             track_children.append(html.Div(className=connector_class))
-
-        if current_index is None:
-            css_class = "fpa-pill"
-        elif i < current_index:
-            css_class = "fpa-pill fpa-pill-done"
-        elif i == current_index:
-            css_class = "fpa-pill fpa-pill-current"
-        else:
-            css_class = "fpa-pill fpa-pill-upcoming"
-
-        pill_children = [s["label"]]
-        if current_index is not None and i == current_index:
-            pill_children.insert(0, html.Span("فعلی", className="fpa-pill-current-label"))
-
-        track_children.append(
-            html.Button(
-                pill_children,
-                id={"type": "set-current-step", "instance_id": instance["instance_id"], "step_id": s["step_id"]},
-                className=css_class,
-                n_clicks=0,
+        # Its own class, not the canvas's .fpa-stage-head: the canvas header
+        # is a bar inside a bordered card, while this is a plain caption over
+        # a borderless column. Sharing one class coupled two layouts that
+        # only happen to show similar text.
+        column_children = [
+            html.Div(
+                f"مرحله {stage_index + 1}" + (" — همزمان" if len(stage) > 1 else ""),
+                className="fpa-track-stage-head",
             )
-        )
+        ]
+        column_children.extend(build_track_step(instance_id, step) for step in stage)
+        track_children.append(html.Div(column_children, className="fpa-track-stage"))
 
-    # A plain-language answer to "where are we", not just relying on the
-    # visual highlight below - this was explicitly called out as unclear.
-    if current_index is not None:
-        banner = html.Div(
-            f"📍 اکنون در: {steps[current_index]['label']}",
-            className="fpa-current-banner",
-        )
-    elif not steps:
+    waiting_on = [s for stage in stages for s in stage if s["is_actionable"]]
+    if not stages:
         banner = html.Div(
             "این نسخه هنوز مرحله‌ای ندارد - چند مرحله در بوم بالا اضافه کنید.",
             style={"color": TEXT_MUTED, "fontSize": "12.5px", "marginBottom": "10px"},
         )
+    elif progress["is_complete"]:
+        banner = html.Div("🏁 این فرایند کامل شده است.", className="fpa-current-banner")
     else:
         banner = html.Div(
-            "مرحله‌ی فعلی مشخص نشده - برای تعیین جایگاه این دوره، یکی از مراحل زیر را کلیک کنید.",
-            style={"color": TEXT_MUTED, "fontSize": "12.5px", "marginBottom": "10px"},
+            "📍 اکنون در انتظار: " + "، ".join(s["label"] for s in waiting_on),
+            className="fpa-current-banner",
         )
 
     if instance["instance_id"] == editing_instance_id:
@@ -444,17 +635,20 @@ def build_instance_row(
             style={"marginBottom": "0"},
         )
 
-    # Overdue badge: only meaningful once the current step both exists and
-    # carries an sla_days (most steps won't - it's opt-in per step, see the
-    # step-details editor), computed fresh on every render rather than
-    # stored, so it's always right regardless of when the page was loaded.
+    # Overdue badges, one per waiting step that has an sla_days set (opt-in
+    # per step). Measured from that step's own state timestamp - how long
+    # *this* person has had it - rather than the instance's updated_at,
+    # which with parallel branches moves whenever any branch acts and so
+    # would keep resetting everyone else's clock.
     header_extra = []
-    if current_step is not None and current_step.get("sla_days"):
-        elapsed_days = (datetime.now() - instance["updated_at"]).days
-        if elapsed_days > current_step["sla_days"]:
+    for step in waiting_on:
+        if not step.get("sla_days") or not step.get("state_updated_at"):
+            continue
+        elapsed_days = (datetime.now() - step["state_updated_at"]).days
+        if elapsed_days > step["sla_days"]:
             header_extra.append(
                 html.Span(
-                    f"⚠ {elapsed_days} روز در این مرحله (مهلت {current_step['sla_days']} روز)",
+                    f"⚠ {step['label']}: {elapsed_days} روز (مهلت {step['sla_days']} روز)",
                     style={
                         "color": CRITICAL_COLOR,
                         "background": "var(--fpa-critical-soft)",
@@ -463,19 +657,19 @@ def build_instance_row(
                         "padding": "3px 10px",
                         "fontSize": "11px",
                         "fontWeight": "700",
-                    }
+                    },
                 )
             )
-    if current_step is not None and current_step.get("is_optional"):
-        header_extra.append(
-            html.Button(
-                "رد کردن این مرحله (اختیاری)",
-                id={"type": "skip-step-btn", "instance_id": instance["instance_id"]},
-                n_clicks=0,
-                className="fpa-btn-quiet",
-                style={"border": f"1px solid {BORDER}", "fontSize": "11px", "padding": "4px 10px"},
-            )
+    header_extra.append(
+        html.Button(
+            "▶ شروع مجدد",
+            id={"type": "restart-instance-btn", "instance_id": instance["instance_id"]},
+            n_clicks=0,
+            className="fpa-btn-quiet",
+            style={"border": f"1px solid {BORDER}", "fontSize": "11px", "padding": "4px 10px"},
+            title="همه‌ی مراحل به حالت اولیه برمی‌گردد و فرایند از ابتدا شروع می‌شود",
         )
+    )
 
     return html.Div(
         className="fpa-instance-row",
@@ -534,7 +728,12 @@ def build_instance_history(instance_id: int, history: list[dict], expanded: bool
     if not expanded:
         return html.Div(toggle, style={"marginTop": "8px"})
 
-    action_fa = {"advance": "پیشروی", "reject": "بازگشت", "skip": "رد (اختیاری)"}
+    action_fa = {
+        "advance": "شروع",
+        "approve": "تایید",
+        "reject": "عدم تایید",
+        "skip": "رد (اختیاری)",
+    }
     lines = []
     for h in history[:3]:
         origin = h["from_label"] or "شروع"
@@ -573,7 +772,7 @@ def build_instance_history(instance_id: int, history: list[dict], expanded: bool
 
 def build_instance_list(
     instances: list[dict],
-    steps: list[dict],
+    progress: dict | None,
     editing_instance_id: int | None = None,
     history_by_instance: dict[int, list[dict]] | None = None,
     expanded_history_instance_id: int | None = None,
@@ -585,7 +784,7 @@ def build_instance_list(
     # all (e.g. the database has zero versions - can't happen in practice,
     # since app.serve_layout/switch_module always create one), so this is a
     # defensive fallback, not a real "go create one" prompt anymore.
-    if not instances:
+    if not instances or progress is None:
         return html.Div(
             "گردش‌کاری انتخاب نشده.",
             style={"color": TEXT_MUTED, "fontSize": "13px"},
@@ -594,7 +793,7 @@ def build_instance_list(
     return [
         build_instance_row(
             inst,
-            steps,
+            progress,
             editing_instance_id=editing_instance_id,
             history=history_by_instance.get(inst["instance_id"]),
             expanded_history_instance_id=expanded_history_instance_id,
@@ -625,6 +824,11 @@ def steps_json(steps: list[dict]) -> str:
                 "role_name": s["role_name"],
                 "color_hex": s["color_hex"],
                 "label": s["label"],
+                # Without these two the JS would fall back to "one step per
+                # stage" on every reload and silently flatten a parallel
+                # design back into a linear one - see syncFromServerIfNeeded.
+                "stage": s["stage"],
+                "lane": s["lane"],
             }
             for s in steps
         ]
@@ -640,7 +844,16 @@ def steps_store_payload(steps: list[dict]) -> list[dict]:
     looks brand-new next Save, silently wiping owner/duty/template/etc for
     steps nobody actually touched.
     """
-    return [{"role_id": s["role_id"], "label": s["label"], "key": f"s{s['step_id']}"} for s in steps]
+    return [
+        {
+            "role_id": s["role_id"],
+            "label": s["label"],
+            "key": f"s{s['step_id']}",
+            "stage": s["stage"],
+            "lane": s["lane"],
+        }
+        for s in steps
+    ]
 
 
 def build_steps_payload(version: dict | None):
@@ -668,7 +881,7 @@ def build_steps_payload(version: dict | None):
 
 
 def build_canvas_dropzone(version: dict | None):
-    steps = version["steps"] if version else []
+    stages = version["stages"] if version else []
     return html.Div(
         id="fpa-canvas-dropzone",
         className="fpa-canvas-dropzone",
@@ -678,19 +891,36 @@ def build_canvas_dropzone(version: dict | None):
         style={"direction": "ltr"},
         children=[
             build_steps_payload(version),
+            # Zoom-to-fit, rather than a horizontal scrollbar: the viewport is
+            # the visible width, the scaler holds the flow at its natural size
+            # and dragdrop.js's fitCanvas() shrinks it with a CSS transform
+            # until it fits. That keeps every stage on one left-to-right line
+            # and on screen at once however many there are, which is what a
+            # scrollbar (you can only ever see part of the process) and
+            # wrapping (the flow breaks mid-line) both fail to do.
+            #
+            # Scaling is safe for drag-and-drop here because dropTargetFrom()
+            # resolves the target with event.target.closest(), i.e. from the
+            # DOM, never from raw clientX coordinates that a transform would
+            # have to be undone from.
             html.Div(
-                style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": "6px", "width": "100%"},
-                children=[
-                    # START/END are pure decoration - never touched by Dash
-                    # again after this first render, and never touched by
-                    # dragdrop.js either (it only ever repaints #fpa-canvas),
-                    # so they can't conflict with either side's ownership.
-                    html.Div("شروع", className="fpa-endpoint"),
-                    html.Span("→", className="fpa-arrow"),
-                    html.Div(id="fpa-canvas", className="fpa-canvas", children=build_canvas_children(steps)),
-                    html.Span("→", className="fpa-arrow"),
-                    html.Div("پایان", className="fpa-endpoint"),
-                ],
+                id="fpa-canvas-viewport",
+                className="fpa-canvas-viewport",
+                children=html.Div(
+                    id="fpa-canvas-scaler",
+                    className="fpa-canvas-scaler",
+                    children=[
+                        # START/END are pure decoration - never touched by Dash
+                        # again after this first render, and never touched by
+                        # dragdrop.js either (it only ever repaints #fpa-canvas),
+                        # so they can't conflict with either side's ownership.
+                        html.Div("شروع", className="fpa-endpoint"),
+                        html.Span("→", className="fpa-arrow"),
+                        html.Div(id="fpa-canvas", className="fpa-canvas", children=build_canvas_children(stages)),
+                        html.Span("→", className="fpa-arrow"),
+                        html.Div("پایان", className="fpa-endpoint"),
+                    ],
+                ),
             ),
         ],
     )
@@ -878,6 +1108,84 @@ def build_step_detail_modal():
     )
 
 
+def reject_backdrop_style(hidden: bool) -> dict:
+    return {
+        "position": "fixed",
+        "inset": "0",
+        "background": "var(--fpa-overlay-backdrop)",
+        "display": "none" if hidden else "flex",
+        "alignItems": "center",
+        "justifyContent": "center",
+        "zIndex": "1000",
+        "padding": "20px",
+    }
+
+
+def build_reject_modal():
+    """The comment box a rejection has to go through.
+
+    Rejecting is never a bare button click: the person sending work back
+    always states why first, and that text is what
+    fpna.notify.format_step_message puts in the Telegram message the
+    previous person receives (its دلیل بازگشت line). workflow.reject_step
+    refuses an empty note independently, so this is the prompt, not the
+    validation.
+
+    Rendered once as part of the first page load and never removed, like
+    build_step_detail_modal - see that function's docstring for why an id
+    born later inside a callback-injected subtree fails Dash's client-side
+    callback validation.
+    """
+    return html.Div(
+        id="reject-backdrop",
+        style=reject_backdrop_style(hidden=True),
+        children=html.Div(
+            style={
+                **CARD_STYLE,
+                "width": "min(440px, 92vw)",
+                "position": "relative",
+                "boxShadow": "0 20px 48px var(--fpa-shadow-lg)",
+            },
+            children=[
+                html.Div("عدم تایید و بازگشت به مرحله‌ی قبل", style={"fontWeight": "700", "fontSize": "15px", "marginBottom": "4px"}),
+                html.Div(
+                    id="reject-modal-subtitle",
+                    style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "12px"},
+                ),
+                html.Label("دلیل عدم تایید (الزامی)", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
+                dcc.Textarea(
+                    id="reject-note-input",
+                    placeholder="مثلاً: ارقام بخش فروش با صورت مالی مغایرت دارد و باید اصلاح شود.",
+                    style={"width": "100%", "minHeight": "90px", "marginTop": "6px"},
+                ),
+                html.Div(
+                    id="reject-modal-status",
+                    style={"color": CRITICAL_COLOR, "fontSize": "11.5px", "marginTop": "6px", "minHeight": "16px"},
+                ),
+                html.Div(
+                    [
+                        html.Button(
+                            "انصراف",
+                            id="reject-cancel-btn",
+                            n_clicks=0,
+                            className="fpa-btn-quiet",
+                            style={"border": f"1px solid {BORDER}"},
+                        ),
+                        html.Div(style={"flex": "1"}),
+                        html.Button(
+                            "ثبت عدم تایید و ارسال",
+                            id="reject-confirm-btn",
+                            n_clicks=0,
+                            className="fpa-btn-danger",
+                        ),
+                    ],
+                    style={"display": "flex", "alignItems": "center", "gap": "8px", "marginTop": "14px"},
+                ),
+            ],
+        ),
+    )
+
+
 def build_status_summary(summary: list[dict]):
     """Per-step pending/overdue counts (workflow.step_status_summary) for
     the currently-selected version - doubles as a lightweight "what needs
@@ -929,6 +1237,198 @@ def build_status_summary(summary: list[dict]):
     return html.Div(tiles, style={"display": "flex", "gap": "10px", "flexWrap": "wrap"})
 
 
+def build_schedule_rows(schedules: list[dict]):
+    """The table of scheduled kick-offs in the settings module."""
+    if not schedules:
+        return html.Div(
+            "هنوز زمان‌بندی‌ای تعریف نشده.",
+            style={"color": TEXT_MUTED, "fontSize": "12.5px"},
+        )
+    rows = []
+    for schedule in schedules:
+        fired = schedule["last_run_at"] is not None and (
+            schedule["run_at"] is None or schedule["last_run_at"] >= schedule["run_at"]
+        )
+        if not schedule["enabled"]:
+            status_text, status_color = "غیرفعال", TEXT_MUTED
+        elif fired:
+            status_text, status_color = "✓ اجرا شد", GOOD_COLOR
+        else:
+            status_text, status_color = "● در انتظار", ACCENT
+        rows.append(
+            html.Div(
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "12px",
+                    "flexWrap": "wrap",
+                    "padding": "10px 12px",
+                    "border": f"1px solid {BORDER}",
+                    "borderRadius": "8px",
+                    "background": "var(--fpa-surface-2)",
+                },
+                children=[
+                    html.Div(
+                        [
+                            html.Div(schedule["version_name"], style={"fontWeight": "700", "fontSize": "13px"}),
+                            html.Div(
+                                schedule["run_at"].strftime("%Y-%m-%d %H:%M") if schedule["run_at"] else "",
+                                style={"fontSize": "11.5px", "color": TEXT_SECONDARY, "marginTop": "2px", "direction": "ltr"},
+                            ),
+                        ],
+                        style={"flex": "1", "minWidth": "160px"},
+                    ),
+                    html.Span(
+                        status_text,
+                        style={
+                            "color": status_color,
+                            "border": f"1px solid {status_color}",
+                            "borderRadius": "999px",
+                            "padding": "2px 10px",
+                            "fontSize": "11px",
+                            "fontWeight": "700",
+                        },
+                    ),
+                    html.Button(
+                        "غیرفعال کردن" if schedule["enabled"] else "فعال کردن",
+                        id={"type": "schedule-toggle-btn", "schedule_id": schedule["schedule_id"]},
+                        n_clicks=0,
+                        className="fpa-btn-quiet",
+                        style={"border": f"1px solid {BORDER}", "fontSize": "11px", "padding": "4px 10px"},
+                    ),
+                    html.Button(
+                        "🗑",
+                        id={"type": "schedule-delete-btn", "schedule_id": schedule["schedule_id"]},
+                        n_clicks=0,
+                        className="fpa-btn-danger",
+                        style={"fontSize": "12px", "padding": "3px 10px"},
+                        title="حذف این زمان‌بندی",
+                    ),
+                ],
+            )
+        )
+    return html.Div(rows, style={"display": "flex", "flexDirection": "column", "gap": "8px"})
+
+
+def build_roles_settings_card(roles: list[dict], editing_role_id: int | None = None):
+    return html.Div(
+        style={**CARD_STYLE, "marginBottom": "20px"},
+        children=[
+            html.Div("نقش‌ها", style={"fontWeight": "600", "marginBottom": "2px"}),
+            html.Div(
+                "نقش‌هایی که در طراحی گردش‌کار استفاده می‌شوند. برای هر نقش می‌توانید نام مسئول و ایمیل او را هم ثبت کنید.",
+                style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+            ),
+            html.Div(
+                style={"display": "flex", "gap": "10px", "alignItems": "center", "flexWrap": "wrap", "marginBottom": "16px"},
+                children=[
+                    dcc.Input(
+                        id="new-role-name",
+                        type="text",
+                        placeholder="نام نقش جدید",
+                        style={"width": "240px", "height": "34px"},
+                    ),
+                    html.Button("+ افزودن نقش", id="add-role-btn", n_clicks=0),
+                    html.Div(id="add-role-status", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
+                ],
+            ),
+            html.Div(
+                id="role-manager",
+                children=build_role_manager(roles, editing_role_id),
+                style={"display": "flex", "flexDirection": "column", "gap": "8px"},
+            ),
+        ],
+    )
+
+
+def build_settings_page(versions: list[dict], schedules: list[dict], roles: list[dict] | None = None):
+    """Settings: role administration and scheduled kick-offs.
+
+    Roles live here rather than on the designer page because managing them
+    is occasional configuration, while the designer page needs its width for
+    the canvas - the palette there is now drag-sources only.
+
+    A schedule says "put this workflow into motion at this moment" - firing
+    it resets every step to pending and notifies the first stage, exactly
+    as the manual "شروع مجدد" button does (both go through
+    workflow.start_workflow).
+
+    Timing is checked by the dashboard's own 5-second tick, so a schedule
+    fires while the dashboard is open and otherwise fires the first time it
+    is opened after the due moment - never silently skipped, never fired
+    twice (workflow.due_schedules/mark_schedule_run). That trade is stated
+    on the page itself rather than left for someone to discover.
+    """
+    return html.Div(
+        [
+            build_roles_settings_card(roles or []),
+            html.Div(
+                style={**CARD_STYLE, "marginBottom": "20px"},
+                children=[
+                    html.Div("زمان‌بندی شروع خودکار گردش‌کار", style={"fontWeight": "600", "marginBottom": "2px"}),
+                    html.Div(
+                        "یک گردش‌کار از پیش تعریف‌شده را انتخاب کنید تا در تاریخ و ساعت مشخصی به‌طور خودکار به جریان بیفتد.",
+                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                    ),
+                    html.Div(
+                        style={"display": "flex", "gap": "12px", "alignItems": "flex-end", "flexWrap": "wrap"},
+                        children=[
+                            html.Div(
+                                [
+                                    html.Label("گردش‌کار", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
+                                    dcc.Dropdown(
+                                        id="schedule-version-picker",
+                                        options=version_options(versions),
+                                        value=versions[0]["version_id"] if versions else None,
+                                        clearable=False,
+                                        style={"width": "280px"},
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("تاریخ", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
+                                    dcc.DatePickerSingle(
+                                        id="schedule-date-picker",
+                                        display_format="YYYY-MM-DD",
+                                        placeholder="انتخاب تاریخ",
+                                    ),
+                                ]
+                            ),
+                            html.Div(
+                                [
+                                    html.Label("ساعت (۲۴ ساعته)", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
+                                    dcc.Input(
+                                        id="schedule-time-input",
+                                        type="text",
+                                        value="09:00",
+                                        placeholder="09:00",
+                                        style={"width": "110px", "height": "34px", "direction": "ltr", "textAlign": "center"},
+                                    ),
+                                ]
+                            ),
+                            html.Button("افزودن زمان‌بندی", id="schedule-add-btn", n_clicks=0),
+                        ],
+                    ),
+                    html.Div(id="schedule-add-status", style={"color": TEXT_SECONDARY, "fontSize": "12px", "marginTop": "10px"}),
+                    html.Div(
+                        "توجه: بررسی زمان‌بندی‌ها توسط همین داشبورد انجام می‌شود. اگر در لحظه‌ی سررسید داشبورد باز نباشد، "
+                        "زمان‌بندی حذف نمی‌شود و در اولین باری که داشبورد باز شود اجرا خواهد شد.",
+                        style={"color": TEXT_MUTED, "fontSize": "11.5px", "marginTop": "12px", "lineHeight": "1.7"},
+                    ),
+                ],
+            ),
+            html.Div(
+                style={**CARD_STYLE},
+                children=[
+                    html.Div("زمان‌بندی‌های تعریف‌شده", style={"fontWeight": "600", "marginBottom": "12px"}),
+                    html.Div(id="schedule-list", children=build_schedule_rows(schedules)),
+                ],
+            ),
+        ]
+    )
+
+
 def workflow_tab_button_class(tab_id: str, active_tab: str) -> str:
     return "fpa-workflow-tab fpa-workflow-tab-active" if tab_id == active_tab else "fpa-workflow-tab"
 
@@ -960,6 +1460,7 @@ def build_designer_page(
     status_summary: list[dict] | None = None,
     history_by_instance: dict[int, list[dict]] | None = None,
     expanded_history_instance_id: int | None = None,
+    progress: dict | None = None,
 ):
     # Two tabs, not one long scroll: "طراحی" (roles/canvas/step-detail) is
     # what you touch while building a template, "نمونه‌های در حال اجرا" is
@@ -980,36 +1481,22 @@ def build_designer_page(
                 id="workflow-design-tab",
                 style=workflow_tab_container_style(visible=True),
                 children=[
+                    # Canvas FIRST in DOM order, roles second. The page is
+                    # RTL, so the first flex child sits on the right (next to
+                    # the sidebar) - putting the canvas first is what lands
+                    # the roles column on the LEFT edge, mirroring the
+                    # reference design where the palette sits opposite the
+                    # menu. No flexWrap: the roles column must never drop
+                    # below the canvas and steal a whole row.
                     html.Div(
-                        style={"display": "flex", "gap": "20px", "alignItems": "flex-start", "flexWrap": "wrap"},
+                        style={"display": "flex", "gap": "16px", "alignItems": "flex-start"},
                         children=[
                             html.Div(
-                                style={**CARD_STYLE, "width": "220px", "flexShrink": "0"},
-                                children=[
-                                    html.Div("نقش‌ها", style={"fontWeight": "600", "marginBottom": "4px"}),
-                                    html.Div(
-                                        "یک نقش را به بوم بکشید تا یک مرحله اضافه شود.",
-                                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
-                                    ),
-                                    html.Div(build_role_palette(roles), id="role-palette"),
-                                    html.Div(
-                                        style={"borderTop": f"1px solid {BORDER}", "marginTop": "16px", "paddingTop": "14px"},
-                                        children=[
-                                            html.Label("+ افزودن نقش", style={"color": TEXT_SECONDARY, "fontSize": "12px"}),
-                                            dcc.Input(
-                                                id="new-role-name",
-                                                type="text",
-                                                placeholder="نام نقش",
-                                                style={"width": "100%", "height": "32px", "marginTop": "6px", "marginBottom": "8px"},
-                                            ),
-                                            html.Button("افزودن", id="add-role-btn", n_clicks=0, style={"width": "100%"}),
-                                            html.Div(id="add-role-status", style={"color": TEXT_SECONDARY, "fontSize": "11.5px", "marginTop": "6px"}),
-                                        ],
-                                    ),
-                                ],
-                            ),
-                            html.Div(
-                                style={**CARD_STYLE, "flex": "1", "minWidth": "420px"},
+                                # flex-basis 0 so the canvas card never forces
+                                # a line break and simply takes every pixel
+                                # the roles column does not - same reasoning
+                                # as .fpa-canvas itself in style.css.
+                                style={**CARD_STYLE, "flex": "1 1 0", "minWidth": "0"},
                                 children=[
                                     html.Div(
                                         style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "4px"},
@@ -1038,8 +1525,37 @@ def build_designer_page(
                                         ],
                                     ),
                                     html.Div(
-                                        "یک نقش را از پنل نقش‌ها به این بوم بکشید تا مرحله‌ای اضافه شود. برای تغییر ترتیب، یک مرحله‌ی موجود را بکشید؛ برای حذف، آن را به سطل زباله بکشید.",
-                                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                                        [
+                                            html.Div(
+                                                "هر کادر یک «مرحله» است. نقشی که داخل یک کادر بیفتد، همزمان با بقیه‌ی نقش‌های همان کادر کار می‌کند و مرحله‌ی بعد تا تایید همه‌ی آن‌ها شروع نمی‌شود.",
+                                                style={"marginBottom": "6px"},
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Span("◀ ", style={"color": ACCENT}),
+                                                    "برای ",
+                                                    html.B("مرحله‌ی جدید"),
+                                                    "، نقش را روی نوار نقطه‌چین ",
+                                                    html.B("بین"),
+                                                    " دو کادر رها کنید.",
+                                                ]
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Span("◀ ", style={"color": ACCENT}),
+                                                    "برای ",
+                                                    html.B("همزمان‌کردن"),
+                                                    " با یک مرحله‌ی موجود، نقش را ",
+                                                    html.B("داخل"),
+                                                    " همان کادر رها کنید.",
+                                                ]
+                                            ),
+                                            html.Div(
+                                                "برای جابه‌جایی، خودِ مرحله را بکشید؛ برای حذف، آن را به سطل زباله بکشید.",
+                                                style={"marginTop": "6px"},
+                                            ),
+                                        ],
+                                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px", "lineHeight": "1.9"},
                                     ),
                                     build_canvas_dropzone(selected_version),
                                     html.Div(
@@ -1049,6 +1565,53 @@ def build_designer_page(
                                     ),
                                     html.Div(id="step-details-list", children=build_step_details_list(steps)),
                                     html.Div(id="save-steps-status", style={"color": TEXT_SECONDARY, "fontSize": "12px", "marginTop": "10px"}),
+                                ],
+                            ),
+                            # The roles column - second child, so RTL puts it
+                            # on the far left, opposite the sidebar. Drag
+                            # sources only; everything about *managing* roles
+                            # now lives in the settings module, linked below.
+                            html.Div(
+                                style={**CARD_STYLE, "width": "190px", "flexShrink": "0", "padding": "16px 14px"},
+                                children=[
+                                    html.Div("نقش‌ها", style={"fontWeight": "600", "marginBottom": "4px"}),
+                                    html.Div(
+                                        "یک نقش را بکشید و روی یک مرحله رها کنید.",
+                                        style={"color": TEXT_MUTED, "fontSize": "11.5px", "marginBottom": "12px", "lineHeight": "1.7"},
+                                    ),
+                                    html.Div(build_role_palette(roles), id="role-palette", className="fpa-role-palette"),
+                                    html.Div(
+                                        style={"borderTop": f"1px solid {BORDER}", "marginTop": "14px", "paddingTop": "12px"},
+                                        children=[
+                                            html.Button(
+                                                "⚙  مدیریت نقش‌ها",
+                                                # A pattern-matching id, not a
+                                                # plain string one, because this
+                                                # button only exists on the
+                                                # designer page while the
+                                                # callback it feeds
+                                                # (switch_module) stays live on
+                                                # every module. A plain string
+                                                # Input that disappears while
+                                                # its callback is still
+                                                # resolvable is exactly what
+                                                # Dash reports as "a
+                                                # nonexistent object was used
+                                                # in an Input"; an ALL matcher
+                                                # is allowed to match nothing.
+                                                id={"type": "goto-module-btn", "module": "settings"},
+                                                n_clicks=0,
+                                                className="fpa-btn-quiet",
+                                                style={
+                                                    "border": f"1px solid {BORDER}",
+                                                    "width": "100%",
+                                                    "fontSize": "11.5px",
+                                                    "padding": "7px 8px",
+                                                },
+                                                title="افزودن، ویرایش و حذف نقش‌ها در بخش تنظیمات",
+                                            ),
+                                        ],
+                                    ),
                                 ],
                             ),
                         ],
@@ -1077,14 +1640,15 @@ def build_designer_page(
                                 # the same design in parallel (e.g. two budget years), make a
                                 # second workflow (version) for the second one - each has its
                                 # own independent progress.
-                                "برای مشخص‌کردن مرحله‌ی فعلی این گردش‌کار، روی یکی از مراحل زیر کلیک کنید.",
-                                style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                                "هر نفر فقط روی مرحله‌ی خودش و فقط وقتی نوبتش رسیده باشد می‌تواند اقدام کند: "
+                                "«تایید و ارسال» کار را به مرحله‌ی بعد می‌فرستد و «عدم تایید» آن را همراه با توضیح به مرحله‌ی قبل بازمی‌گرداند.",
+                                style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px", "lineHeight": "1.8"},
                             ),
                             html.Div(
                                 id="instance-list",
                                 children=build_instance_list(
                                     instances,
-                                    steps,
+                                    progress,
                                     history_by_instance=history_by_instance,
                                     expanded_history_instance_id=expanded_history_instance_id,
                                 ),
@@ -1117,11 +1681,19 @@ TOUR_STEPS = [
     },
     {
         "title": "بوم طراحی گردش‌کار",
-        "body": "ترتیب مراحل را با کشیدن‌شان تغییر دهید، و برای حذف یک مرحله، آن را به سطل زباله زیر بوم بکشید. پس از هر تغییر، «ذخیره‌ی تغییرات» را بزنید.",
+        "body": "هر ستون یک مرحله است. نقش را روی فاصله‌ی بین ستون‌ها رها کنید تا مرحله‌ی جدیدی ساخته شود، یا روی خودِ یک ستون رها کنید تا آن نقش همزمان با بقیه‌ی افراد آن ستون کار کند. پس از هر تغییر، «ذخیره‌ی تغییرات» را بزنید.",
     },
     {
-        "title": "روند اجرا",
-        "body": "هر گردش‌کار، روند اجرای خودش را دارد - کافی است روی مراحل تب «نمونه‌های در حال اجرا» کلیک کنید تا مرحله‌ی فعلی‌اش را مشخص کنید؛ نیازی به ساختن جداگانه‌ی چیزی نیست.",
+        "title": "مراحل همزمان",
+        "body": "اگر چند نقش در یک ستون باشند، کار همزمان برای همه‌شان ارسال می‌شود و مرحله‌ی بعدی تا وقتی همه‌ی آن‌ها تایید نکنند شروع نمی‌شود.",
+    },
+    {
+        "title": "تایید و عدم تایید",
+        "body": "در تب «نمونه‌های در حال اجرا»، هر نفر فقط روی مرحله‌ی خودش و فقط وقتی نوبتش رسیده باشد دکمه دارد: «تایید و ارسال» به مرحله‌ی بعد می‌فرستد، و «عدم تایید» با نوشتن دلیل، کار را به مرحله‌ی قبل بازمی‌گرداند.",
+    },
+    {
+        "title": "زمان‌بندی",
+        "body": "در بخش «تنظیمات» می‌توانید مشخص کنید یک گردش‌کار در چه تاریخ و ساعتی به‌طور خودکار به جریان بیفتد.",
     },
 ]
 
@@ -1235,7 +1807,7 @@ MODULES = [
     {"id": "workflow", "icon": "🔁", "label": "طراح گردش‌کار"},
     {"id": "statements", "icon": "📊", "label": "صورت‌های مالی سه‌گانه"},
     {"id": "actual-budget", "icon": "⚖️", "label": "واقعی و بودجه"},
-    {"id": "admin", "icon": "⚙️", "label": "پنل مدیریت"},
+    {"id": "settings", "icon": "⚙️", "label": "تنظیمات"},
 ]
 
 PLACEHOLDER_MODULES = {
@@ -1246,10 +1818,6 @@ PLACEHOLDER_MODULES = {
     "actual-budget": (
         "واقعی و بودجه",
         "مقایسه‌ی ارقام واقعی با بودجه و تحلیل انحراف - این بخش به‌زودی تکمیل می‌شود.",
-    ),
-    "admin": (
-        "پنل مدیریت",
-        "مدیریت کاربران، دسترسی‌ها و تنظیمات - این بخش به‌زودی تکمیل می‌شود.",
     ),
 }
 
@@ -1328,9 +1896,13 @@ def build_module_content(
     status_summary: list[dict] | None = None,
     history_by_instance: dict[int, list[dict]] | None = None,
     expanded_history_instance_id: int | None = None,
+    progress: dict | None = None,
+    schedules: list[dict] | None = None,
 ):
     if module_id in PLACEHOLDER_MODULES:
         return build_placeholder_module(module_id)
+    if module_id == "settings":
+        return build_settings_page(versions, schedules or [], roles)
     return build_designer_page(
         roles,
         versions,
@@ -1339,6 +1911,7 @@ def build_module_content(
         status_summary,
         history_by_instance,
         expanded_history_instance_id,
+        progress=progress,
     )
 
 
@@ -1351,6 +1924,8 @@ def build_shell(
     status_summary: list[dict] | None = None,
     history_by_instance: dict[int, list[dict]] | None = None,
     expanded_history_instance_id: int | None = None,
+    progress: dict | None = None,
+    schedules: list[dict] | None = None,
 ):
     return html.Div(
         id="fpa-app-root",
@@ -1409,6 +1984,12 @@ def build_shell(
                     # build_step_detail_modal/callbacks.open_or_close_step_detail.
                     dcc.Store(id="editing-step-detail-id", data=None),
                     build_step_detail_modal(),
+                    # Which step a rejection is being written for, held
+                    # between the "عدم تایید" click that opens the comment
+                    # box and the confirm that actually submits it - see
+                    # build_reject_modal/callbacks.open_reject_modal.
+                    dcc.Store(id="pending-reject-step-id", data=None),
+                    build_reject_modal(),
                     # dcc.Upload fires its "contents" Input more than once
                     # for a single real file pick (confirmed live) - these
                     # dedupe by content hash so one upload can't get
@@ -1432,6 +2013,8 @@ def build_shell(
                             status_summary=status_summary,
                             history_by_instance=history_by_instance,
                             expanded_history_instance_id=expanded_history_instance_id,
+                            progress=progress,
+                            schedules=schedules,
                         ),
                     ),
                     # Ticks in the background for as long as the page is

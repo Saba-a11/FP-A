@@ -36,6 +36,50 @@ def _history_by_instance(conn: duckdb.DuckDBPyConnection, instances: list[dict])
     return {i["instance_id"]: workflow.list_instance_history(conn, i["instance_id"]) for i in instances}
 
 
+def _progress_for(conn: duckdb.DuckDBPyConnection, version_id: int | None) -> dict | None:
+    """The instance-progress read model for the selected version, or None if
+    nothing is selected. Every place that re-renders the instance list goes
+    through this, so no callback ever hand-rolls "whose turn is it".
+    """
+    if version_id is None:
+        return None
+    instance = workflow.get_or_create_instance(conn, version_id)
+    return workflow.instance_progress(conn, instance["instance_id"], version_id)
+
+
+def _render_instance_list(
+    conn: duckdb.DuckDBPyConnection,
+    version_id: int | None,
+    expanded_history_instance_id=None,
+    editing_instance_id=None,
+):
+    """Rebuilds the instance-list subtree for the selected version. Six
+    different callbacks end with exactly this, so it lives here once rather
+    than being copy-pasted with slightly different arguments each time.
+    """
+    if version_id is None:
+        return layout.build_instance_list([], None)
+    instances = [workflow.get_or_create_instance(conn, version_id)]
+    return layout.build_instance_list(
+        instances,
+        _progress_for(conn, version_id),
+        editing_instance_id=editing_instance_id,
+        history_by_instance=_history_by_instance(conn, instances),
+        expanded_history_instance_id=expanded_history_instance_id,
+    )
+
+
+def _notify_steps(conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int, steps: list[dict], event: str, note: str | None = None) -> None:
+    """Send one notification per step that just landed on someone's desk.
+
+    Plural on purpose: completing a stage can open several parallel branches
+    at once, and each of those people needs their own message with their own
+    step's detail and template file attached.
+    """
+    for step in steps:
+        _notify_step_change(conn, instance_id, version_id, step["step_id"], event, note)
+
+
 def _notify_step_change(
     conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int, step_id: int, event: str, note: str | None = None
 ) -> None:
@@ -67,10 +111,22 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         Output({"type": "module-nav-btn", "module": ALL}, "className"),
         Output("active-module", "data"),
         Input({"type": "module-nav-btn", "module": ALL}, "n_clicks"),
+        # "Jump to module X" buttons living inside a page - e.g. the
+        # designer's "مدیریت نقش‌ها", which hands the user to the settings
+        # module where role administration now lives. Routing them through
+        # this same callback (rather than a second one that also writes
+        # page-content) keeps module switching in exactly one place.
+        #
+        # Matched with ALL rather than named individually on purpose: such a
+        # button exists on one module only, and a plain string Input that
+        # vanishes while this callback is still live (its sidebar inputs
+        # always exist) is what Dash reports as "a nonexistent object was
+        # used in an Input". An ALL matcher may legally match nothing.
+        Input({"type": "goto-module-btn", "module": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
-    def switch_module(_clicks):
-        # Same remount-vs-click ambiguity fixed for mark_current_step below:
+    def switch_module(_clicks, _goto_module_clicks):
+        # Same remount-vs-click ambiguity fixed for advance_step below:
         # nothing here re-renders the nav buttons themselves, but Dash
         # still fires this callback once at hydration with every n_clicks
         # already at its initial 0, which must not be mistaken for a real
@@ -79,6 +135,8 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
             return no_update, no_update, no_update, no_update
 
+        # Both id shapes carry the destination in "module", so the two cases
+        # read the same field - only the "type" differs.
         module_id = triggered["module"]
         classnames = [layout.sidebar_button_class(m["id"], module_id) for m in layout.MODULES]
         header = layout.build_module_header(module_id)
@@ -105,6 +163,16 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
                 instances,
                 status_summary=summary,
                 history_by_instance=_history_by_instance(conn, instances),
+                progress=_progress_for(conn, selected_version_id),
+            )
+        elif module_id == "settings":
+            content = layout.build_module_content(
+                module_id,
+                workflow.list_roles(conn),
+                workflow.list_versions(conn),
+                None,
+                [],
+                schedules=workflow.list_schedules(conn),
             )
         else:
             content = layout.build_module_content(module_id, [], [], None, [])
@@ -170,12 +238,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             layout.build_version_bar(versions, version),
             layout.steps_json(steps),
             layout.canvas_render_token(version),
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
-            ),
+            _render_instance_list(conn, selected_version_id, expanded_history_instance_id),
             layout.steps_store_payload(steps),
             layout.build_status_summary(summary),
             layout.build_step_details_list(steps),
@@ -257,6 +320,16 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         Output("status-summary-content", "children", allow_duplicate=True),
         Output("step-details-list", "children", allow_duplicate=True),
         Output("save-steps-status", "children"),
+        # The dropdown label carries the step count ("... (4 مرحله)"), so a
+        # save that changes the number of steps has to refresh it or the
+        # title keeps showing the pre-save count until a page reload.
+        #
+        # Only *options* is rewritten, never the whole version-bar-container:
+        # rebuilding that container recreates the Dropdown as a new element,
+        # which fires version-picker.value and re-triggers switch_or_create,
+        # which would then blank this callback's own status message. Same
+        # reasoning (and same fix) as import_version below.
+        Output("version-picker", "options", allow_duplicate=True),
         Input("save-steps-btn", "n_clicks"),
         State("version-picker", "value"),
         State("workflow-steps-store", "data"),
@@ -265,45 +338,53 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
     )
     def save_steps(n_clicks, version_id, steps_data, expanded_history_instance_id):
         if not n_clicks:
-            return (no_update,) * 7
+            return (no_update,) * 8
         if version_id is None:
-            return no_update, no_update, no_update, no_update, no_update, no_update, "اول یک نسخه را انتخاب یا ایجاد کنید."
+            return (
+                no_update, no_update, no_update, no_update, no_update, no_update,
+                "اول یک نسخه را انتخاب یا ایجاد کنید.",
+                no_update,
+            )
 
-        # Peek at whether this version's run already had a real current step
-        # *before* saving - if not, and this save is what gives it one (its
-        # own creation, right here, or steps landing on a version whose run
-        # was still parked at nothing), that's the moment to send the same
-        # "handed to them" notification create_instance used to send on
-        # manual creation. See workflow.get_or_create_instance/save_steps.
+        # Which steps were actionable *before* the save, so the ones that
+        # become actionable purely because of it (a version that had no steps
+        # at all until now, or an edit that opened a new first stage) get the
+        # same "it's on your desk" notification any other hand-off would
+        # send. Comparing before/after rather than "did it have a current
+        # step" is what keeps this correct for a parallel first stage, where
+        # several people become actionable at the same moment.
         instance_before = workflow.get_or_create_instance(conn, version_id)
-        had_current_step = bool(instance_before["current_step_id"])
+        before_actionable = workflow.instance_progress(
+            conn, instance_before["instance_id"], version_id
+        )["actionable_ids"]
 
         workflow.save_steps(conn, version_id, steps_data or [])
 
         version = workflow.get_version(conn, version_id)
         instance = workflow.get_or_create_instance(conn, version_id)
-        if not had_current_step and instance["current_step_id"]:
-            _notify_step_change(conn, instance["instance_id"], version_id, instance["current_step_id"], "advance")
-        instances = [instance]
+        after = workflow.instance_progress(conn, instance["instance_id"], version_id)
+        newly_actionable = [
+            step
+            for stage in after["stages"]
+            for step in stage
+            if step["step_id"] in after["actionable_ids"] - before_actionable
+        ]
+        _notify_steps(conn, instance["instance_id"], version_id, newly_actionable, "advance")
         summary = workflow.step_status_summary(conn, version_id)
         steps = version["steps"] if version else []
         return (
             layout.steps_json(steps),
             layout.canvas_render_token(version),
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
-            ),
+            _render_instance_list(conn, version_id, expanded_history_instance_id),
             layout.steps_store_payload(steps),
             layout.build_status_summary(summary),
             layout.build_step_details_list(steps),
             f"ذخیره شد — {len(steps)} مرحله.",
+            layout.version_options(workflow.list_versions(conn)),
         )
 
     @app.callback(
-        Output("role-palette", "children", allow_duplicate=True),
+        Output("role-manager", "children", allow_duplicate=True),
         Output("add-role-status", "children"),
         Output("new-role-name", "value"),
         Input("add-role-btn", "n_clicks"),
@@ -326,12 +407,11 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             return no_update, f"نقشی با نام «{name}» از قبل وجود دارد.", no_update
 
         roles = workflow.list_roles(conn)
-        return layout.build_role_palette(roles), f"«{name}» اضافه شد.", ""
+        return layout.build_role_manager(roles), f"«{name}» اضافه شد.", ""
 
     @app.callback(
-        Output("role-palette", "children", allow_duplicate=True),
+        Output("role-manager", "children", allow_duplicate=True),
         Output("editing-role-id", "data"),
-        Output("status-summary-content", "children", allow_duplicate=True),
         Input({"type": "role-chip-label", "role_id": ALL}, "n_clicks"),
         Input({"type": "role-name-input", "role_id": ALL}, "n_submit"),
         Input({"type": "role-name-save", "role_id": ALL}, "n_clicks"),
@@ -339,22 +419,27 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         State({"type": "role-name-input", "role_id": ALL}, "value"),
         State({"type": "role-assignee-name-input", "role_id": ALL}, "value"),
         State({"type": "role-assignee-email-input", "role_id": ALL}, "value"),
-        State("version-picker", "value"),
         prevent_initial_call=True,
     )
-    def edit_role(_label_clicks, _submits, _save_clicks, _cancel_clicks, name_values, assignee_name_values, assignee_email_values, version_id):
-        # Same remount-vs-click ambiguity fixed for mark_current_step below:
-        # this callback's own Output (role-palette) contains every id it
-        # listens on, so re-rendering the palette for *any* reason (e.g.
-        # clicking a different role's label) makes the whole pattern-matched
-        # set look like it just "changed" too. Only trust a genuine trigger
-        # with both a real id and a truthy value.
+    def edit_role(_label_clicks, _submits, _save_clicks, _cancel_clicks, name_values, assignee_name_values, assignee_email_values):
+        # Same remount-vs-click ambiguity fixed for advance_step below: this
+        # callback's own Output (role-manager) contains every id it listens
+        # on, so re-rendering the list for *any* reason (e.g. clicking a
+        # different role's edit button) makes the whole pattern-matched set
+        # look like it just "changed" too. Only trust a genuine trigger with
+        # both a real id and a truthy value.
+        #
+        # No status-summary Output any more: role editing lives in the
+        # settings module now, and the summary tiles it used to refresh only
+        # exist on the workflow module, which is never mounted at the same
+        # time. Those tiles are rebuilt from scratch on the next module
+        # switch anyway (switch_module), so an assignee rename still shows up
+        # the moment you go back to look at them.
         triggered = ctx.triggered_id
         if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update, no_update, no_update
+            return no_update, no_update
 
         role_id = triggered["role_id"]
-        summary_update = no_update
         if triggered["type"] == "role-chip-label":
             editing_role_id = role_id
         elif triggered["type"] == "role-name-cancel":
@@ -365,14 +450,10 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             assignee_email = (assignee_email_values[0] if assignee_email_values else "").strip()
             if new_name:
                 workflow.update_role_details(conn, role_id, new_name, assignee_name, assignee_email)
-                # assignee_name feeds the status-summary tiles too - only
-                # worth recomputing if a version is actually selected.
-                if version_id is not None:
-                    summary_update = layout.build_status_summary(workflow.step_status_summary(conn, version_id))
             editing_role_id = None
 
         roles = workflow.list_roles(conn)
-        return layout.build_role_palette(roles, editing_role_id=editing_role_id), editing_role_id, summary_update
+        return layout.build_role_manager(roles, editing_role_id=editing_role_id), editing_role_id
 
     @app.callback(
         Output("delete-role-confirm", "displayed"),
@@ -411,7 +492,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         return True, f"نقش «{name}» حذف شود؟ این کار قابل بازگشت نیست.", role_id, no_update
 
     @app.callback(
-        Output("role-palette", "children", allow_duplicate=True),
+        Output("role-manager", "children", allow_duplicate=True),
         Output("add-role-status", "children", allow_duplicate=True),
         Output("delete-role-confirm", "displayed", allow_duplicate=True),
         Input("delete-role-confirm", "submit_n_clicks"),
@@ -427,7 +508,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             return no_update, "این نقش دیگر قابل حذف نیست - در یکی از مراحل استفاده شده.", False
         workflow.delete_role(conn, pending_role_id)
         roles = workflow.list_roles(conn)
-        return layout.build_role_palette(roles), "نقش حذف شد.", False
+        return layout.build_role_manager(roles), "نقش حذف شد.", False
 
     @app.callback(
         Output("instance-list", "children", allow_duplicate=True),
@@ -463,12 +544,8 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
         steps = version["steps"] if version else []
         return (
-            layout.build_instance_list(
-                instances,
-                steps,
-                editing_instance_id=editing_instance_id,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
+            _render_instance_list(
+                conn, version_id, expanded_history_instance_id, editing_instance_id=editing_instance_id
             ),
             editing_instance_id,
         )
@@ -476,71 +553,127 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
     @app.callback(
         Output("instance-list", "children", allow_duplicate=True),
         Output("status-summary-content", "children", allow_duplicate=True),
-        Input({"type": "set-current-step", "instance_id": ALL, "step_id": ALL}, "n_clicks"),
+        Input({"type": "approve-step-btn", "instance_id": ALL, "step_id": ALL}, "n_clicks"),
+        Input({"type": "skip-step-btn", "instance_id": ALL, "step_id": ALL}, "n_clicks"),
+        Input({"type": "restart-instance-btn", "instance_id": ALL}, "n_clicks"),
         State("version-picker", "value"),
         State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def mark_current_step(_all_clicks, version_id, expanded_history_instance_id):
-        # triggered_id is None when Dash fires this because the whole set of
-        # pattern-matched pills was just replaced (e.g. instance-list
-        # re-rendered by an unrelated callback), not because one was really
-        # clicked - the same remount-vs-click ambiguity fixed in XP-A's
-        # button callbacks. Only a genuine single click gives a real id here.
-        triggered = ctx.triggered_id
-        if triggered is None:
-            return no_update, no_update
-        if not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update, no_update
-        action = workflow.set_current_step(conn, triggered["instance_id"], triggered["step_id"])
-        _notify_step_change(conn, triggered["instance_id"], version_id, triggered["step_id"], action)
+    def advance_step(_approve_clicks, _skip_clicks, _restart_clicks, version_id, expanded_history_instance_id):
+        """The three forward moves - approve, skip an optional step, and
+        restart the whole run - share one callback because they share their
+        entire tail: apply the move, notify whoever it just landed on, then
+        re-render. Only their first line differs.
 
-        version = workflow.get_version(conn, version_id) if version_id is not None else None
-        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
+        triggered_id is None when Dash fires this because the whole set of
+        pattern-matched buttons was just replaced (e.g. instance-list
+        re-rendered by an unrelated callback), not because one was really
+        clicked - the same remount-vs-click ambiguity fixed in XP-A's button
+        callbacks. Only a genuine click gives a real id here.
+        """
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update, no_update
+
+        instance_id = triggered["instance_id"]
+        if triggered["type"] == "approve-step-btn":
+            result = workflow.approve_step(conn, instance_id, triggered["step_id"])
+        elif triggered["type"] == "skip-step-btn":
+            result = workflow.skip_step(conn, instance_id, triggered["step_id"])
+        else:
+            result = workflow.start_workflow(conn, version_id)
+
+        if result["ok"]:
+            # One message per branch that just opened - a completed parallel
+            # stage can hand work to several people at once.
+            _notify_steps(
+                conn,
+                instance_id,
+                version_id,
+                result["newly_actionable"],
+                "skip" if triggered["type"] == "skip-step-btn" else "advance",
+            )
+
         summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
-        steps = version["steps"] if version else []
         return (
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
-            ),
+            _render_instance_list(conn, version_id, expanded_history_instance_id),
             layout.build_status_summary(summary),
         )
 
     @app.callback(
+        Output("reject-backdrop", "style"),
+        Output("reject-modal-subtitle", "children"),
+        Output("reject-note-input", "value"),
+        Output("reject-modal-status", "children"),
+        Output("pending-reject-step-id", "data"),
+        Input({"type": "reject-step-btn", "instance_id": ALL, "step_id": ALL}, "n_clicks"),
+        Input("reject-cancel-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def open_or_close_reject_modal(_reject_clicks, _cancel_clicks):
+        """Opens the mandatory-comment box for a rejection, or closes it.
+
+        Deliberately does NOT listen on reject-confirm-btn, for the same
+        reason open_or_close_step_detail doesn't listen on its save button:
+        the confirm callback needs to read pending-reject-step-id as State,
+        and if this one also fired on that click the two would race to
+        decide the store's value before the other read it.
+        """
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return (no_update,) * 5
+
+        if triggered == "reject-cancel-btn":
+            return layout.reject_backdrop_style(hidden=True), no_update, "", "", None
+
+        step = workflow.get_step(conn, triggered["step_id"])
+        subtitle = ""
+        if step:
+            subtitle = f"مرحله‌ی «{step['label']}» به مرحله‌ی قبل بازگردانده می‌شود."
+        return layout.reject_backdrop_style(hidden=False), subtitle, "", "", triggered["step_id"]
+
+    @app.callback(
+        Output("reject-backdrop", "style", allow_duplicate=True),
+        Output("reject-modal-status", "children", allow_duplicate=True),
+        Output("pending-reject-step-id", "data", allow_duplicate=True),
         Output("instance-list", "children", allow_duplicate=True),
         Output("status-summary-content", "children", allow_duplicate=True),
-        Input({"type": "skip-step-btn", "instance_id": ALL}, "n_clicks"),
+        Input("reject-confirm-btn", "n_clicks"),
+        State("pending-reject-step-id", "data"),
+        State("reject-note-input", "value"),
         State("version-picker", "value"),
         State("expanded-history-instance-id", "data"),
         prevent_initial_call=True,
     )
-    def skip_step(_clicks, version_id, expanded_history_instance_id):
-        triggered = ctx.triggered_id
-        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
-            return no_update, no_update
-        # A no-op (False) if the step wasn't actually optional or there's no
-        # next step - the button that triggers this is only ever rendered
-        # when workflow_step.is_optional is true (see
-        # layout.build_instance_row), so this should never realistically
-        # fail in normal use; nothing more to surface if it does.
-        new_step_id = workflow.skip_current_step(conn, triggered["instance_id"])
-        if new_step_id:
-            _notify_step_change(conn, triggered["instance_id"], version_id, new_step_id, "skip")
+    def confirm_reject(n_clicks, step_id, note, version_id, expanded_history_instance_id):
+        if not n_clicks or step_id is None or version_id is None:
+            return (no_update,) * 5
 
-        version = workflow.get_version(conn, version_id) if version_id is not None else None
-        instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
-        summary = workflow.step_status_summary(conn, version_id) if version_id is not None else []
-        steps = version["steps"] if version else []
+        instance = workflow.get_or_create_instance(conn, version_id)
+        result = workflow.reject_step(conn, instance["instance_id"], step_id, note or "")
+        if not result["ok"]:
+            # Stays open with the reason shown - most often the empty-note
+            # case, where closing the box would just lose what they typed.
+            return no_update, result["reason"], no_update, no_update, no_update
+
+        # The people the work went *back* to get the rejection note in their
+        # message - that text is the whole point of requiring it.
+        _notify_steps(
+            conn,
+            instance["instance_id"],
+            version_id,
+            result["returned_to"],
+            "reject",
+            note=result["note"],
+        )
+
+        summary = workflow.step_status_summary(conn, version_id)
         return (
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
-            ),
+            layout.reject_backdrop_style(hidden=True),
+            "",
+            None,
+            _render_instance_list(conn, version_id, expanded_history_instance_id),
             layout.build_status_summary(summary),
         )
 
@@ -570,12 +703,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         # instance's history is expanded - keep it expanded so the just-
         # added note is immediately visible instead of the panel collapsing
         # back to a bare toggle right after a successful save.
-        return layout.build_instance_list(
-            instances,
-            steps,
-            history_by_instance=_history_by_instance(conn, instances),
-            expanded_history_instance_id=expanded_history_instance_id,
-        )
+        return _render_instance_list(conn, version_id, expanded_history_instance_id)
 
     @app.callback(
         Output("instance-list", "children", allow_duplicate=True),
@@ -604,12 +732,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         instances = [workflow.get_or_create_instance(conn, version_id)] if version_id is not None else []
         steps = version["steps"] if version else []
         return (
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=new_expanded,
-            ),
+            _render_instance_list(conn, version_id, new_expanded),
             new_expanded,
         )
 
@@ -732,12 +855,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
             None,
             layout.build_step_details_list(steps),
             layout.build_status_summary(summary),
-            layout.build_instance_list(
-                instances,
-                steps,
-                history_by_instance=_history_by_instance(conn, instances),
-                expanded_history_instance_id=expanded_history_instance_id,
-            ),
+            _render_instance_list(conn, version_id, expanded_history_instance_id),
         )
 
     @app.callback(
@@ -816,11 +934,88 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
         # every 5s (see db.sync_mirror for why this can't just be an external
         # file copy) - lets any other tool inspect current data without ever
         # stopping this dashboard.
+        #
+        # The same tick is also where scheduled kick-offs fire. Piggy-backing
+        # on an interval that already exists (rather than adding a second one)
+        # keeps there being exactly one clock in the app, and the catch-up
+        # semantics mean a schedule that came due while the dashboard was
+        # closed still fires on the first tick after it reopens - see
+        # workflow.due_schedules.
+        _run_due_schedules()
         synced = db.sync_mirror(conn)
+        # Bounds how much is ever sitting in the WAL: with a checkpoint every
+        # cycle, an abrupt kill can lose at most one tick's writes instead of
+        # a whole session's, and the WAL never grows into something DuckDB
+        # struggles to replay. Best-effort by design - see db.checkpoint.
+        db.checkpoint(conn)
         now = datetime.now().strftime("%H:%M:%S")
         if synced:
             return f"کپی زنده ساعت {now} همگام‌سازی شد ← {config.MIRROR_DB_PATH}"
         return f"کپی زنده ساعت {now} رد شد (فایل مپی جای دیگری مشغول است - دوباره تلاش می‌شود) ← {config.MIRROR_DB_PATH}"
+
+    def _run_due_schedules() -> None:
+        """Start every workflow whose schedule has come due, then mark it run.
+
+        mark_schedule_run happens even if the kick-off itself reported a
+        problem: a schedule that keeps failing must not re-fire on every
+        5-second tick forever, spamming the channel. Notification failures
+        are already best-effort and logged (see _notify_step_change).
+        """
+        for schedule in workflow.due_schedules(conn):
+            result = workflow.start_workflow(conn, schedule["version_id"])
+            if result["ok"]:
+                _notify_steps(
+                    conn,
+                    result["instance_id"],
+                    schedule["version_id"],
+                    result["newly_actionable"],
+                    "advance",
+                )
+            workflow.mark_schedule_run(conn, schedule["schedule_id"])
+
+    @app.callback(
+        Output("schedule-list", "children"),
+        Output("schedule-add-status", "children"),
+        Input("schedule-add-btn", "n_clicks"),
+        Input({"type": "schedule-toggle-btn", "schedule_id": ALL}, "n_clicks"),
+        Input({"type": "schedule-delete-btn", "schedule_id": ALL}, "n_clicks"),
+        State("schedule-version-picker", "value"),
+        State("schedule-date-picker", "date"),
+        State("schedule-time-input", "value"),
+        prevent_initial_call=True,
+    )
+    def manage_schedules(_add_clicks, _toggle_clicks, _delete_clicks, version_id, date_value, time_value):
+        triggered = ctx.triggered_id
+        if triggered is None or not ctx.triggered or not ctx.triggered[0]["value"]:
+            return no_update, no_update
+
+        status = ""
+        if triggered == "schedule-add-btn":
+            if version_id is None:
+                return no_update, "اول یک گردش‌کار را انتخاب کنید."
+            if not date_value:
+                return no_update, "تاریخ را انتخاب کنید."
+            try:
+                hour, minute = (time_value or "09:00").strip().split(":")
+                run_at = datetime.fromisoformat(str(date_value)[:10]).replace(
+                    hour=int(hour), minute=int(minute), second=0, microsecond=0
+                )
+            except (ValueError, TypeError):
+                return no_update, "ساعت را به صورت HH:MM وارد کنید (مثلاً 09:00)."
+            workflow.create_schedule(conn, version_id, run_at)
+            status = f"زمان‌بندی برای {run_at:%Y-%m-%d %H:%M} ثبت شد."
+        elif triggered["type"] == "schedule-toggle-btn":
+            current = next(
+                (s for s in workflow.list_schedules(conn) if s["schedule_id"] == triggered["schedule_id"]),
+                None,
+            )
+            if current is not None:
+                workflow.set_schedule_enabled(conn, triggered["schedule_id"], not current["enabled"])
+        else:
+            workflow.delete_schedule(conn, triggered["schedule_id"])
+            status = "زمان‌بندی حذف شد."
+
+        return layout.build_schedule_rows(workflow.list_schedules(conn)), status
 
     @app.callback(
         Output("tour-backdrop", "style"),

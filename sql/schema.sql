@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS workflow_version (
     updated_at TIMESTAMP NOT NULL DEFAULT current_timestamp
 );
 
+-- step_order is the STAGE index, and is deliberately NOT unique per version:
+-- two or more steps sharing one step_order are the parallel branches of a
+-- single stage (the "several people at once, then aggregate" case). A stage
+-- is complete only when every step in it is approved, and the next stage
+-- can't start until then - see workflow.stage_is_complete/actionable_steps.
+-- A plain linear workflow is just the degenerate case where every stage
+-- happens to hold exactly one step, so old designs keep working untouched.
 CREATE SEQUENCE IF NOT EXISTS seq_workflow_step_id START 1;
 CREATE TABLE IF NOT EXISTS workflow_step (
     step_id INTEGER PRIMARY KEY DEFAULT nextval('seq_workflow_step_id'),
@@ -37,6 +44,12 @@ CREATE TABLE IF NOT EXISTS workflow_step (
     step_order INTEGER NOT NULL,
     label VARCHAR  -- optional override, falls back to the role's name if null
 );
+
+-- Position within a stage (top-to-bottom order of the parallel branches in
+-- one canvas column). Purely presentational - it never affects execution,
+-- since everything in a stage runs at once - but it keeps the canvas from
+-- reshuffling branches on every reload.
+ALTER TABLE workflow_step ADD COLUMN IF NOT EXISTS lane INTEGER DEFAULT 0;
 
 -- Per-step operating detail, added after the fact via ALTER so upgrading an
 -- already-seeded database is as simple as re-running this file (every
@@ -105,8 +118,59 @@ CREATE TABLE IF NOT EXISTS workflow_instance_history (
     instance_id INTEGER NOT NULL REFERENCES workflow_instance(instance_id),
     from_step_id INTEGER,
     to_step_id INTEGER NOT NULL,
-    action VARCHAR NOT NULL,  -- 'advance' | 'reject' | 'skip'
+    action VARCHAR NOT NULL,  -- 'advance' | 'approve' | 'reject' | 'skip'
     note VARCHAR,
     actor VARCHAR,
+    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp
+);
+
+-- Per-(instance, step) progress. This is what replaced
+-- workflow_instance.current_step_id as the source of truth once a stage
+-- could hold several parallel steps: a single pointer can't express "A and
+-- C have approved, B hasn't yet". current_step_id is still written (the
+-- first actionable step) purely so anything not yet migrated reads
+-- something sensible, but nothing decides anything from it - see
+-- workflow.actionable_steps.
+--
+-- state:
+--   'pending'  - not approved yet. Actionable only once every step in the
+--                PREVIOUS stage is approved (stage 0 is always actionable).
+--   'approved' - this person signed off, and it counts toward its stage.
+--                (Careful: db.run_sql_file splits this file on the statement
+--                separator character without skipping comments, so no comment
+--                here may contain one.)
+--   'rejected' - this person sent it back. Stays not-approved, so its stage
+--                stays incomplete, and the previous stage is reset to
+--                'pending' so it can be redone. Siblings in the same stage
+--                are deliberately left alone (the user's own call): only the
+--                rejecting branch goes back, everyone else keeps their
+--                approval.
+--
+-- No FK on step_id, same reasoning as current_step_id above: save_steps can
+-- delete a step row, and a hard FK would block that edit. Orphans are
+-- cleaned up in workflow.sync_instance_states instead.
+CREATE TABLE IF NOT EXISTS workflow_instance_step_state (
+    instance_id INTEGER NOT NULL REFERENCES workflow_instance(instance_id),
+    step_id INTEGER NOT NULL,
+    state VARCHAR NOT NULL DEFAULT 'pending',
+    note VARCHAR,
+    actor VARCHAR,
+    updated_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    PRIMARY KEY (instance_id, step_id)
+);
+
+-- Scheduled kick-offs: "start this workflow on this date". Checked by the
+-- dashboard's own 5-second tick (callbacks.sync_mirror_tick ->
+-- workflow.run_due_schedules), so a due schedule fires while the dashboard
+-- is open, and otherwise fires the next time it's opened - never silently
+-- skipped. last_run_at is what makes that catch-up idempotent: a schedule
+-- whose last_run_at is already past its run_at is never re-fired.
+CREATE SEQUENCE IF NOT EXISTS seq_workflow_schedule_id START 1;
+CREATE TABLE IF NOT EXISTS workflow_schedule (
+    schedule_id INTEGER PRIMARY KEY DEFAULT nextval('seq_workflow_schedule_id'),
+    version_id INTEGER NOT NULL REFERENCES workflow_version(version_id),
+    run_at TIMESTAMP NOT NULL,
+    enabled BOOLEAN DEFAULT true,
+    last_run_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT current_timestamp
 );

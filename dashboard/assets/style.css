@@ -18,6 +18,13 @@
   --fpa-surface: #171724;
   --fpa-surface-2: #1f1f30;
   --fpa-border: rgba(255, 255, 255, 0.08);
+  /* Stage cards on the canvas need a border with real contrast against the
+     page, not the barely-there hairline --fpa-border gives elsewhere: the
+     whole point of a stage card is that you can see where it starts and
+     ends. Kept as its own token so tuning it can never soften every other
+     border in the app. */
+  --fpa-stage-border: rgba(255, 255, 255, 0.22);
+  --fpa-stage-header: #262639;
   --fpa-text: #ffffff;
   --fpa-text-secondary: #a3a3b8;
   --fpa-text-muted: #6f6f85;
@@ -48,6 +55,8 @@
   --fpa-surface: #ffffff;
   --fpa-surface-2: #f4f6f9;
   --fpa-border: rgba(15, 23, 42, 0.10);
+  --fpa-stage-border: rgba(15, 23, 42, 0.28);
+  --fpa-stage-header: #e8ecf3;
   --fpa-text: #16213e;
   --fpa-text-secondary: #4b5670;
   --fpa-text-muted: #8993ab;
@@ -527,8 +536,11 @@ button.fpa-history-toggle:hover {
 .fpa-canvas-dropzone {
   border: 2px dashed var(--fpa-border);
   border-radius: 12px;
-  padding: 28px;
-  min-height: 160px;
+  /* Tighter than it was: the flow inside is now scaled to fit, so its height
+     shrinks with the zoom, and generous fixed padding/min-height left a big
+     dead band under a long (heavily scaled) workflow. */
+  padding: 16px 18px;
+  min-height: 128px;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 .fpa-canvas-dropzone.fpa-drag-over {
@@ -537,12 +549,202 @@ button.fpa-history-toggle:hover {
 }
 .fpa-canvas {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  align-items: stretch;
+  gap: 0;
   min-height: 104px;
-  flex: 1 1 auto;
-  min-width: 220px;
+  /* Natural width, never shrunk and never scrolled: fitting the flow to the
+     screen is the scaler's job now (see .fpa-canvas-scaler and
+     dragdrop.js fitCanvas), so this must report its true content width for
+     that measurement to be right. */
+  flex: 0 0 auto;
+}
+
+/* Zoom-to-fit wrapper. The viewport is exactly as wide as the page allows
+   and clips; the scaler holds the flow at natural size and is scaled down by
+   fitCanvas() until it fits, so every stage stays on one line and on screen
+   however many there are. Height is set in JS because a CSS transform does
+   not change layout size. */
+.fpa-canvas-viewport {
+  width: 100%;
+  overflow: hidden;
+}
+.fpa-canvas-scaler {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  transform-origin: 0 0;
+  /* No transition on transform: this is re-measured and re-applied on every
+     render and resize, and animating it would make the canvas visibly
+     rubber-band on each drag. */
+}
+
+/* --- stage columns (parallel branches) ---
+   A stage is one column. Everything stacked inside it runs at once, and
+   nothing in the next column starts until this whole column is approved -
+   see sql/schema.sql and dragdrop.js's stageHtml(). The vertical stack IS
+   the "these happen together" signal, so it must never wrap or collapse
+   into a row. */
+.fpa-stage {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  /* Kept deliberately tight: every pixel of intrinsic stage width is
+     multiplied by the stage count and paid back as a smaller zoom-to-fit
+     scale, so a wide card makes a long workflow unreadable. */
+  min-width: 168px;
+  align-self: flex-start;
+  border: 2px solid var(--fpa-stage-border);
+  border-radius: 12px;
+  background: var(--fpa-surface);
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* A stage holding parallel branches is called out in its own colour, so
+   "these run together" is readable at a glance and not only from the
+   header text. */
+.fpa-stage.fpa-stage-parallel {
+  border-color: var(--fpa-accent);
+  box-shadow: 0 0 0 3px var(--fpa-accent-glow);
+}
+.fpa-stage.fpa-drag-over {
+  border-color: var(--fpa-good);
+  box-shadow: 0 0 0 4px var(--fpa-good-soft);
+}
+.fpa-stage-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--fpa-stage-header);
+  border-bottom: 2px solid var(--fpa-stage-border);
+}
+.fpa-stage.fpa-stage-parallel .fpa-stage-head {
+  border-bottom-color: var(--fpa-accent);
+}
+.fpa-stage-num {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--fpa-text);
+  letter-spacing: 0.02em;
+}
+.fpa-stage-tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--fpa-accent);
+  border: 1px solid var(--fpa-accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.fpa-stage-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+.fpa-stage-note {
+  font-size: 10px;
+  color: var(--fpa-text-secondary);
+  text-align: center;
+  padding: 0 10px 8px;
+}
+
+/* The explicit "add a role to THIS stage" target, always visible at the
+   bottom of every column. Before this existed, joining a stage meant aiming
+   at the column and hoping - there was no boundary and no affordance. */
+.fpa-stage-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 9px 8px;
+  border: 1.5px dashed var(--fpa-border);
+  border-radius: 8px;
+  color: var(--fpa-text-muted);
+  font-size: 11px;
+  text-align: center;
+  pointer-events: none; /* the drop is handled by .fpa-stage, see dropTargetFrom */
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.fpa-stage-drop-sub {
+  font-size: 9.5px;
+  opacity: 0.75;
+}
+.fpa-stage.fpa-drag-over .fpa-stage-drop {
+  border-color: var(--fpa-good);
+  color: var(--fpa-good);
+  background: var(--fpa-good-soft);
+}
+
+/* The drop target BETWEEN two columns: drop here to open a NEW stage rather
+   than join an existing one. Permanently visible as a labelled dashed lane -
+   the earlier 18px arrow-only version left the stage boundary invisible,
+   which is exactly what made the flow hard to read. */
+.fpa-gap {
+  flex-shrink: 0;
+  /* There is one more gap than there are stages, so this width is the single
+     biggest contributor to the flow's intrinsic size - at 66px it alone cost
+     a 7-stage design about 25% of its width and forced the zoom past its
+     floor into scrolling. 44px still reads as a labelled lane. */
+  width: 44px;
+  align-self: stretch;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 10px;
+  border: 1.5px dashed transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.fpa-gap-line {
+  flex: 1;
+  width: 0;
+  border-left: 2px dotted var(--fpa-border);
+  min-height: 8px;
+}
+.fpa-gap-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--fpa-text-muted);
+  color: var(--fpa-text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.fpa-gap-label {
+  font-size: 9px;
+  color: var(--fpa-text-muted);
+  text-align: center;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.fpa-gap.fpa-drag-over {
+  background: var(--fpa-accent-soft);
+  border-color: var(--fpa-accent);
+}
+.fpa-gap.fpa-drag-over .fpa-gap-badge {
+  border-color: var(--fpa-accent);
+  border-style: solid;
+  color: #ffffff;
+  background: var(--fpa-accent);
+  transform: scale(1.15);
+}
+.fpa-gap.fpa-drag-over .fpa-gap-label {
+  color: var(--fpa-accent);
+  font-weight: 700;
+}
+.fpa-gap.fpa-drag-over .fpa-gap-line {
+  border-left-color: var(--fpa-accent);
 }
 .fpa-canvas-empty {
   display: flex;
@@ -704,61 +906,107 @@ button.fpa-history-toggle:hover {
 
 .fpa-track {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 0;
   margin-top: 20px;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 .fpa-track-connector {
   width: 22px;
   height: 2px;
   background: var(--fpa-border);
   flex-shrink: 0;
+  /* Sits beside the first card in each column rather than centred on the
+     whole column, which with parallel branches can be several cards tall. */
+  margin-top: 34px;
 }
 .fpa-track-connector.fpa-connector-done {
   background: var(--fpa-good);
 }
-.fpa-pill {
-  border: 2px solid var(--fpa-border);
-  border-radius: 10px;
-  padding: 10px 16px;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  font-family: inherit;
-  background: var(--fpa-surface-2);
-  color: var(--fpa-text-muted);
+/* --- progress track (one column per stage, mirroring the canvas) ---
+   The old .fpa-pill row assumed one clickable step at a time. With parallel
+   stages the track has to show several people waiting at once and give each
+   of them their own approve/reject buttons, so a step is now a small card in
+   a stage column rather than a pill in a row. */
+.fpa-track-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 190px;
+}
+/* --- roles: lean drag palette (designer) vs full manager (settings) --- */
+.fpa-role-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* A long role list must not push the palette taller than the canvas beside
+     it - scroll the list, not the page. */
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.fpa-role-manager-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  position: relative;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--fpa-border);
+  border-left: 4px solid var(--role-color, var(--fpa-border));
+  border-radius: 9px;
+  background: var(--fpa-surface-2);
 }
-.fpa-pill.fpa-pill-done {
-  background: rgba(12, 163, 12, 0.12);
-  color: #4fd24f;
-  border-color: rgba(12, 163, 12, 0.4);
-}
-.fpa-pill.fpa-pill-current {
-  background: var(--fpa-accent);
-  color: #ffffff;
+.fpa-role-manager-row-editing {
+  display: block;
   border-color: var(--fpa-accent);
-  box-shadow: 0 0 0 4px var(--fpa-accent-glow);
-  transform: scale(1.05);
+  box-shadow: 0 0 0 3px var(--fpa-accent-glow);
 }
-.fpa-pill.fpa-pill-upcoming {
-  opacity: 0.55;
-}
-.fpa-pill-current-label {
-  position: absolute;
-  top: -22px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 10px;
+
+.fpa-track-stage-head {
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--fpa-accent);
-  white-space: nowrap;
+  color: var(--fpa-text-muted);
+  letter-spacing: 0.03em;
+  text-align: center;
 }
-.fpa-pill:hover {
-  filter: brightness(1.15);
+.fpa-track-step {
+  border: 2px solid var(--fpa-border);
+  border-left: 4px solid var(--role-color, var(--fpa-border));
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--fpa-surface-2);
+  color: var(--fpa-text);
+  opacity: 0.6;
+}
+.fpa-track-step.fpa-track-step-done {
+  opacity: 1;
+  border-color: var(--fpa-good);
+  background: var(--fpa-good-soft);
+}
+.fpa-track-step.fpa-track-step-active {
+  opacity: 1;
+  border-color: var(--fpa-accent);
+  box-shadow: 0 0 0 3px var(--fpa-accent-glow);
+}
+.fpa-track-step.fpa-track-step-rejected {
+  opacity: 1;
+  border-color: var(--fpa-critical);
+  background: var(--fpa-critical-soft);
+}
+button.fpa-approve-btn {
+  background: var(--fpa-good);
+  border: 1px solid var(--fpa-good);
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 5px 12px;
+}
+button.fpa-approve-btn:hover {
+  filter: brightness(1.1);
+  background: var(--fpa-good);
+}
+button.fpa-reject-btn {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 5px 12px;
 }

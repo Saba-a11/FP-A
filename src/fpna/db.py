@@ -13,6 +13,37 @@ def get_connection(db_path: Path | None = None) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(db_path))
 
 
+def checkpoint(conn: duckdb.DuckDBPyConnection) -> bool:
+    """Flush the write-ahead log into the database file.
+
+    Not a tidiness nicety - it is what keeps this database openable at all
+    after an abrupt exit. Reproduced against DuckDB 1.5.5 with a three-way
+    scratch test:
+
+      * WAL holding only ordinary INSERT/UPDATE traffic  -> replays fine
+      * WAL holding schema.sql's DDL (CREATE TABLE/SEQUENCE, ALTER TABLE)
+        -> replay dies with "INTERNAL Error: Failure while replaying WAL
+           file ... GetDefaultDatabase with no default database set",
+           and the database cannot be opened again at all
+      * same DDL followed by CHECKPOINT -> WAL is gone, reopens fine
+
+    Since seed.run_seed replays schema.sql on every single startup, every
+    run carried an unreplayable WAL from launch until DuckDB happened to
+    checkpoint on its own. Checkpointing right after the schema runs closes
+    that window - twice in one session a force-kill during that window left
+    the file unopenable and cost a manual restore from the mirror.
+
+    Never raises: a checkpoint that cannot run right now (an open
+    transaction, say) must not take the caller down with it - the same
+    "must come out of this usable" rule sync_mirror follows.
+    """
+    try:
+        conn.execute("CHECKPOINT")
+        return True
+    except duckdb.Error:
+        return False
+
+
 def run_sql_file(conn: duckdb.DuckDBPyConnection, sql_path: Path) -> None:
     """Execute each ';'-separated statement in a .sql file."""
     # encoding="utf-8" is not optional here: Path.read_text() otherwise

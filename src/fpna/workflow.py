@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from datetime import datetime
 
 import duckdb
 
@@ -118,7 +119,8 @@ _STEP_COLUMNS = """
     s.step_id, s.role_id, s.step_order, s.label, r.role_name, r.color_hex,
     s.owner, s.duty, s.input_desc, s.output_desc, s.acceptance_criteria,
     s.template_path, s.template_original_name, s.sla_days, s.is_optional,
-    s.notification_subject, r.assignee_name, r.assignee_email
+    s.notification_subject, r.assignee_name, r.assignee_email,
+    COALESCE(s.lane, 0)
 """
 
 
@@ -126,7 +128,12 @@ def _step_row_to_dict(s: tuple) -> dict:
     return {
         "step_id": s[0],
         "role_id": s[1],
+        # "stage" is the real name of this concept now that a stage can hold
+        # several parallel steps (see sql/schema.sql on step_order). The old
+        # "step_order" key is kept as an alias so nothing that still reads it
+        # breaks - both always carry the same value.
         "step_order": s[2],
+        "stage": s[2],
         "label": s[3] or s[4],
         "role_name": s[4],
         "color_hex": s[5],
@@ -145,7 +152,25 @@ def _step_row_to_dict(s: tuple) -> dict:
         "notification_subject": s[15],
         "assignee_name": s[16],
         "assignee_email": s[17],
+        "lane": s[18],
     }
+
+
+def group_into_stages(steps: list[dict]) -> list[list[dict]]:
+    """Regroups a flat, (stage, lane)-ordered step list into one list per
+    stage - the shape the canvas renders as columns and the instance track
+    renders as parallel rows. Stage numbers are used only for grouping and
+    ordering here, never as indexes, so a version whose stages aren't
+    contiguous (0, 1, 3 - possible mid-edit) still groups correctly.
+    """
+    stages: list[list[dict]] = []
+    current_stage = None
+    for step in steps:
+        if step["stage"] != current_stage:
+            stages.append([])
+            current_stage = step["stage"]
+        stages[-1].append(step)
+    return stages
 
 
 def get_version(conn: duckdb.DuckDBPyConnection, version_id: int) -> dict | None:
@@ -161,17 +186,22 @@ def get_version(conn: duckdb.DuckDBPyConnection, version_id: int) -> dict | None
         FROM workflow_step s
         JOIN dim_role r ON r.role_id = s.role_id
         WHERE s.version_id = ?
-        ORDER BY s.step_order
+        ORDER BY s.step_order, COALESCE(s.lane, 0), s.step_id
         """,
         [version_id],
     ).fetchall()
+    step_dicts = [_step_row_to_dict(s) for s in steps]
     return {
         "version_id": v[0],
         "name": v[1],
         "status": v[2],
         "created_at": v[3],
         "updated_at": v[4],
-        "steps": [_step_row_to_dict(s) for s in steps],
+        # Flat list (every caller that just wants "all the steps"), plus the
+        # same steps grouped by stage for the canvas/track - one query, two
+        # shapes, so the two can never disagree about ordering.
+        "steps": step_dicts,
+        "stages": group_into_stages(step_dicts),
     }
 
 
@@ -208,8 +238,8 @@ _STEP_KEY_RE = re.compile(r"^s(\d+)$")
 def save_steps(conn: duckdb.DuckDBPyConnection, version_id: int, steps: list[dict]) -> None:
     """Replace the full ordered step list for a version.
 
-    `steps` is a list of {role_id, label, key} in the desired order - `key`
-    is dragdrop.js's client-side id for that chip: "s<step_id>" if it's an
+    `steps` is a list of {role_id, label, key, stage, lane} - `key` is
+    dragdrop.js's client-side id for that chip: "s<step_id>" if it's an
     existing row, "new_..." if it was just dropped this session. A step
     whose key resolves to a row that still exists gets UPDATEd in place
     (keeping its step_id, and therefore keeping owner/duty/template/etc
@@ -217,14 +247,18 @@ def save_steps(conn: duckdb.DuckDBPyConnection, version_id: int, steps: list[dic
     but aren't in the new list anymore are DELETEd (and their uploaded
     template file, if any, cleaned up with them).
 
-    Because a *removed* step's step_id really does stop existing, any
-    running instance of this version that was pointing at it would
-    otherwise dangle - this resets those instances back to the new first
-    step rather than leaving a broken reference. Editing a template out
-    from under an in-progress instance is a real tradeoff, not a hidden
-    bug: it resets that instance's progress, so treat "save" on a version
-    with live instances as a deliberate reset, the same way XP-A locks an
-    Approved Budget version instead of letting an edit invalidate history.
+    `stage` is which canvas column the chip sits in - several steps sharing
+    one stage are that stage's parallel branches (see sql/schema.sql). It's
+    renumbered to a dense 0..n-1 here from the order the stages first
+    appear, so a design edited down to fewer columns never leaves gaps.
+    Missing `stage` falls back to the chip's position, which is exactly the
+    old one-step-per-stage linear behaviour.
+
+    Removing a step really does delete its step_id, so any running instance
+    holding progress against it would dangle - sync_instance_states below
+    reconciles every instance of this version afterwards (drops orphaned
+    rows, adds rows for new steps). Progress on steps that survived the
+    edit is preserved; only what no longer exists is dropped.
     """
     existing_ids = {
         r[0]
@@ -233,20 +267,35 @@ def save_steps(conn: duckdb.DuckDBPyConnection, version_id: int, steps: list[dic
         ).fetchall()
     }
 
+    # Dense-renumber the stages by first appearance, so the stored step_order
+    # is always 0..n-1 with no holes regardless of what the client sent.
+    stage_numbers: dict = {}
+    for position, step in enumerate(steps):
+        raw_stage = step.get("stage")
+        if raw_stage is None:
+            raw_stage = position
+        if raw_stage not in stage_numbers:
+            stage_numbers[raw_stage] = len(stage_numbers)
+
     kept_ids: set[int] = set()
-    for order, step in enumerate(steps):
+    for position, step in enumerate(steps):
+        raw_stage = step.get("stage")
+        if raw_stage is None:
+            raw_stage = position
+        stage = stage_numbers[raw_stage]
+        lane = step.get("lane") or 0
         match = _STEP_KEY_RE.match(step.get("key") or "")
         old_step_id = int(match.group(1)) if match else None
         if old_step_id is not None and old_step_id in existing_ids:
             conn.execute(
-                "UPDATE workflow_step SET role_id = ?, step_order = ?, label = ? WHERE step_id = ?",
-                [step["role_id"], order, step.get("label") or None, old_step_id],
+                "UPDATE workflow_step SET role_id = ?, step_order = ?, lane = ?, label = ? WHERE step_id = ?",
+                [step["role_id"], stage, lane, step.get("label") or None, old_step_id],
             )
             kept_ids.add(old_step_id)
         else:
             conn.execute(
-                "INSERT INTO workflow_step (version_id, role_id, step_order, label) VALUES (?, ?, ?, ?)",
-                [version_id, step["role_id"], order, step.get("label") or None],
+                "INSERT INTO workflow_step (version_id, role_id, step_order, lane, label) VALUES (?, ?, ?, ?, ?)",
+                [version_id, step["role_id"], stage, lane, step.get("label") or None],
             )
 
     for removed_step_id in existing_ids - kept_ids:
@@ -256,22 +305,10 @@ def save_steps(conn: duckdb.DuckDBPyConnection, version_id: int, steps: list[dic
     conn.execute(
         "UPDATE workflow_version SET updated_at = current_timestamp WHERE version_id = ?", [version_id]
     )
-    new_first_step = conn.execute(
-        "SELECT step_id FROM workflow_step WHERE version_id = ? ORDER BY step_order LIMIT 1",
-        [version_id],
-    ).fetchone()
-    new_first_step_id = new_first_step[0] if new_first_step else None
-    conn.execute(
-        """
-        UPDATE workflow_instance
-        SET current_step_id = ?, updated_at = current_timestamp
-        WHERE version_id = ?
-          AND (current_step_id IS NULL OR current_step_id NOT IN (
-              SELECT step_id FROM workflow_step WHERE version_id = ?
-          ))
-        """,
-        [new_first_step_id, version_id, version_id],
-    )
+    for row in conn.execute(
+        "SELECT instance_id FROM workflow_instance WHERE version_id = ?", [version_id]
+    ).fetchall():
+        sync_instance_states(conn, row[0], version_id)
 
 
 def update_step_details(
@@ -399,8 +436,379 @@ def get_or_create_instance(conn: duckdb.DuckDBPyConnection, version_id: int) -> 
         version_row = conn.execute(
             "SELECT name FROM workflow_version WHERE version_id = ?", [version_id]
         ).fetchone()
-        create_instance(conn, version_id, version_row[0] if version_row else "گردش‌کار")
+        instance_id = create_instance(conn, version_id, version_row[0] if version_row else "گردش‌کار")
+    else:
+        instance_id = existing[0]
+    sync_instance_states(conn, instance_id, version_id)
     return list_instances(conn, version_id)[0]
+
+
+# ---- Instance progress across parallel stages ----
+#
+# The engine that replaced the single current_step_id pointer. Three states
+# per (instance, step) - see sql/schema.sql's workflow_instance_step_state -
+# and exactly one derived rule on top of them:
+#
+#     a step is ACTIONABLE  <=>  it is not approved yet
+#                                AND every step in the previous stage is
+#                                approved (stage 0 has no previous stage,
+#                                so it is actionable from the start).
+#
+# Everything the UI shows (who can act now, which stage is done, whether the
+# workflow is finished) falls out of that one rule, so there is no second
+# place where "where are we" is decided and no way for the two to disagree.
+
+STATE_PENDING = "pending"
+STATE_APPROVED = "approved"
+STATE_REJECTED = "rejected"
+
+
+def sync_instance_states(conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int) -> None:
+    """Reconciles one instance's state rows against its version's current
+    steps: adds a pending row for every step that doesn't have one, drops
+    rows for steps that no longer exist (save_steps can delete a step - see
+    the "no FK on step_id" note in sql/schema.sql). Progress on steps that
+    survived an edit is left untouched, so redesigning a stage the workflow
+    has already passed doesn't silently rewind the parts that were done.
+
+    Idempotent, and called from both save_steps and get_or_create_instance,
+    so any path that can change the step list also repairs state on the way
+    through - there's no separate "remember to sync" step to forget.
+    """
+    step_ids = [
+        r[0]
+        for r in conn.execute(
+            "SELECT step_id FROM workflow_step WHERE version_id = ?", [version_id]
+        ).fetchall()
+    ]
+    existing = {
+        r[0]
+        for r in conn.execute(
+            "SELECT step_id FROM workflow_instance_step_state WHERE instance_id = ?", [instance_id]
+        ).fetchall()
+    }
+    for step_id in step_ids:
+        if step_id not in existing:
+            conn.execute(
+                "INSERT INTO workflow_instance_step_state (instance_id, step_id, state) VALUES (?, ?, ?)",
+                [instance_id, step_id, STATE_PENDING],
+            )
+    for orphan_id in existing - set(step_ids):
+        conn.execute(
+            "DELETE FROM workflow_instance_step_state WHERE instance_id = ? AND step_id = ?",
+            [instance_id, orphan_id],
+        )
+    _refresh_current_step_pointer(conn, instance_id, version_id)
+
+
+def instance_step_states(conn: duckdb.DuckDBPyConnection, instance_id: int) -> dict:
+    rows = conn.execute(
+        "SELECT step_id, state, note, actor, updated_at FROM workflow_instance_step_state WHERE instance_id = ?",
+        [instance_id],
+    ).fetchall()
+    return {r[0]: {"state": r[1], "note": r[2], "actor": r[3], "updated_at": r[4]} for r in rows}
+
+
+def instance_progress(conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int) -> dict:
+    """The single read model for "where is this workflow right now" - every
+    view (the track, the status summary, the notifications) reads this
+    rather than re-deriving the rule above for itself.
+
+    Returns the version's stages with each step annotated with its state and
+    whether it's actionable, plus per-stage completion flags, the flat set
+    of actionable step ids, and is_complete for the whole run.
+    """
+    version = get_version(conn, version_id)
+    stages = version["stages"] if version else []
+    states = instance_step_states(conn, instance_id)
+
+    stage_complete = [
+        all(states.get(s["step_id"], {}).get("state") == STATE_APPROVED for s in stage)
+        for stage in stages
+    ]
+
+    annotated_stages = []
+    actionable_ids: set = set()
+    for index, stage in enumerate(stages):
+        previous_done = index == 0 or stage_complete[index - 1]
+        annotated = []
+        for step in stage:
+            state = states.get(step["step_id"], {})
+            step_state = state.get("state") or STATE_PENDING
+            is_actionable = previous_done and step_state != STATE_APPROVED
+            if is_actionable:
+                actionable_ids.add(step["step_id"])
+            annotated.append(
+                {
+                    **step,
+                    "state": step_state,
+                    "state_note": state.get("note"),
+                    "state_actor": state.get("actor"),
+                    "state_updated_at": state.get("updated_at"),
+                    "is_actionable": is_actionable,
+                    "stage_index": index,
+                }
+            )
+        annotated_stages.append(annotated)
+
+    return {
+        "stages": annotated_stages,
+        "stage_complete": stage_complete,
+        "actionable_ids": actionable_ids,
+        "is_complete": bool(stages) and all(stage_complete),
+    }
+
+
+def _refresh_current_step_pointer(conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int) -> None:
+    """Keeps the legacy workflow_instance.current_step_id column pointing at
+    the first actionable step. Nothing decides anything from it any more
+    (see sql/schema.sql) - it's maintained only so any reader that hasn't
+    moved to instance_progress yet still sees something truthful rather
+    than a stale id from before parallel stages existed.
+    """
+    progress = instance_progress(conn, instance_id, version_id)
+    first_actionable = None
+    for stage in progress["stages"]:
+        for step in stage:
+            if step["is_actionable"]:
+                first_actionable = step["step_id"]
+                break
+        if first_actionable is not None:
+            break
+    conn.execute(
+        "UPDATE workflow_instance SET current_step_id = ?, updated_at = current_timestamp WHERE instance_id = ?",
+        [first_actionable, instance_id],
+    )
+
+
+def _version_id_of_instance(conn: duckdb.DuckDBPyConnection, instance_id: int) -> int | None:
+    row = conn.execute(
+        "SELECT version_id FROM workflow_instance WHERE instance_id = ?", [instance_id]
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _set_step_state(
+    conn: duckdb.DuckDBPyConnection,
+    instance_id: int,
+    step_id: int,
+    state: str,
+    note: str | None = None,
+    actor: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE workflow_instance_step_state
+        SET state = ?, note = ?, actor = ?, updated_at = current_timestamp
+        WHERE instance_id = ? AND step_id = ?
+        """,
+        [state, note, actor, instance_id, step_id],
+    )
+
+
+def _log_history(
+    conn: duckdb.DuckDBPyConnection,
+    instance_id: int,
+    from_step_id: int | None,
+    to_step_id: int,
+    action: str,
+    note: str | None = None,
+    actor: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO workflow_instance_history (instance_id, from_step_id, to_step_id, action, note, actor)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [instance_id, from_step_id, to_step_id, action, note or None, actor or None],
+    )
+
+
+def _advance_result(
+    conn: duckdb.DuckDBPyConnection,
+    instance_id: int,
+    version_id: int,
+    before_actionable: set,
+    acted_step_id: int,
+) -> dict:
+    """Shared tail of approve_step/skip_step: recomputes progress and reports
+    which steps just *became* actionable, i.e. exactly the people who need a
+    notification now. Computing it as a set difference rather than "the next
+    stage's steps" is what makes it correct for a parallel stage: approving
+    the 2nd of 3 branches opens nothing and notifies nobody, approving the
+    3rd opens the whole next stage at once.
+    """
+    after = instance_progress(conn, instance_id, version_id)
+    newly_actionable_ids = after["actionable_ids"] - before_actionable - {acted_step_id}
+    newly_actionable = [
+        step
+        for stage in after["stages"]
+        for step in stage
+        if step["step_id"] in newly_actionable_ids
+    ]
+    return {
+        "ok": True,
+        "reason": None,
+        "newly_actionable": newly_actionable,
+        "is_complete": after["is_complete"],
+        "progress": after,
+    }
+
+
+def approve_step(
+    conn: duckdb.DuckDBPyConnection, instance_id: int, step_id: int, actor: str | None = None
+) -> dict:
+    """One person signs off on their own step and hands it forward.
+
+    Refuses unless the step is currently actionable, which is what enforces
+    "you can only approve your own step, and only when it's actually your
+    turn" - the rule the UI also draws (no button on a step that isn't
+    yours), checked here too so it holds regardless of what the client
+    sends.
+    """
+    version_id = _version_id_of_instance(conn, instance_id)
+    if version_id is None:
+        return {"ok": False, "reason": "نمونه یافت نشد.", "newly_actionable": [], "is_complete": False}
+
+    before = instance_progress(conn, instance_id, version_id)
+    if step_id not in before["actionable_ids"]:
+        return {
+            "ok": False,
+            "reason": "این مرحله در حال حاضر قابل تایید نیست.",
+            "newly_actionable": [],
+            "is_complete": before["is_complete"],
+        }
+
+    _set_step_state(conn, instance_id, step_id, STATE_APPROVED, note=None, actor=actor)
+    _log_history(conn, instance_id, step_id, step_id, "approve", actor=actor)
+    result = _advance_result(conn, instance_id, version_id, before["actionable_ids"], step_id)
+    _refresh_current_step_pointer(conn, instance_id, version_id)
+    return result
+
+
+def skip_step(conn: duckdb.DuckDBPyConnection, instance_id: int, step_id: int) -> dict:
+    """Same forward move as approve_step, for a step flagged is_optional -
+    bypassed without that role having to act. Logged as 'skip' so the audit
+    trail distinguishes "they approved it" from "nobody had to".
+    """
+    version_id = _version_id_of_instance(conn, instance_id)
+    if version_id is None:
+        return {"ok": False, "reason": "نمونه یافت نشد.", "newly_actionable": [], "is_complete": False}
+
+    before = instance_progress(conn, instance_id, version_id)
+    if step_id not in before["actionable_ids"]:
+        return {
+            "ok": False,
+            "reason": "این مرحله در حال حاضر قابل رد کردن نیست.",
+            "newly_actionable": [],
+            "is_complete": before["is_complete"],
+        }
+    step = get_step(conn, step_id)
+    if step is None or not step["is_optional"]:
+        return {
+            "ok": False,
+            "reason": "این مرحله اختیاری نیست و نمی‌توان آن را رد کرد.",
+            "newly_actionable": [],
+            "is_complete": before["is_complete"],
+        }
+
+    _set_step_state(conn, instance_id, step_id, STATE_APPROVED, note=None, actor=None)
+    _log_history(conn, instance_id, step_id, step_id, "skip")
+    result = _advance_result(conn, instance_id, version_id, before["actionable_ids"], step_id)
+    _refresh_current_step_pointer(conn, instance_id, version_id)
+    return result
+
+
+def reject_step(
+    conn: duckdb.DuckDBPyConnection,
+    instance_id: int,
+    step_id: int,
+    note: str,
+    actor: str | None = None,
+) -> dict:
+    """Send the work back one stage, with a mandatory explanation.
+
+    `note` is required, not optional: a rejection the previous person can't
+    act on is worse than none, and this text is what fpna.notify puts in
+    their Telegram message (see format_step_message's دلیل بازگشت line).
+
+    Only the previous stage is reset to pending, and only this step is
+    marked rejected - the rejecting branch's siblings keep whatever they had
+    already approved (the user's explicit call: "فقط همان شخص برمی‌گردد،
+    بقیه ادامه می‌دهند"). Rejecting from the first stage is refused: there
+    is nobody behind it to send the work back to.
+    """
+    note = (note or "").strip()
+    if not note:
+        return {"ok": False, "reason": "برای عدم تایید، نوشتن توضیحات الزامی است.", "returned_to": []}
+
+    version_id = _version_id_of_instance(conn, instance_id)
+    if version_id is None:
+        return {"ok": False, "reason": "نمونه یافت نشد.", "returned_to": []}
+
+    before = instance_progress(conn, instance_id, version_id)
+    if step_id not in before["actionable_ids"]:
+        return {"ok": False, "reason": "این مرحله در حال حاضر قابل عدم تایید نیست.", "returned_to": []}
+
+    stage_index = next(
+        (s["stage_index"] for stage in before["stages"] for s in stage if s["step_id"] == step_id),
+        None,
+    )
+    if stage_index is None or stage_index == 0:
+        return {
+            "ok": False,
+            "reason": "این اولین مرحله‌ی فرایند است و مرحله‌ی قبلی برای بازگشت ندارد.",
+            "returned_to": [],
+        }
+
+    previous_stage = before["stages"][stage_index - 1]
+    _set_step_state(conn, instance_id, step_id, STATE_REJECTED, note=note, actor=actor)
+    for previous_step in previous_stage:
+        _set_step_state(conn, instance_id, previous_step["step_id"], STATE_PENDING, note=note, actor=actor)
+        _log_history(conn, instance_id, step_id, previous_step["step_id"], "reject", note=note, actor=actor)
+
+    _refresh_current_step_pointer(conn, instance_id, version_id)
+    return {
+        "ok": True,
+        "reason": None,
+        "note": note,
+        "returned_to": [dict(s) for s in previous_stage],
+        "progress": instance_progress(conn, instance_id, version_id),
+    }
+
+
+def start_workflow(conn: duckdb.DuckDBPyConnection, version_id: int) -> dict:
+    """Kick a workflow off from the beginning: every step back to pending,
+    so the first stage becomes actionable again. Used by the manual "start
+    now" button and by run_due_schedules.
+
+    Returns the same shape as approve_step so callers notify the same way -
+    `newly_actionable` is the first stage, i.e. exactly whose desk the work
+    just landed on.
+    """
+    instance = get_or_create_instance(conn, version_id)
+    instance_id = instance["instance_id"]
+    conn.execute(
+        """
+        UPDATE workflow_instance_step_state
+        SET state = ?, note = NULL, actor = NULL, updated_at = current_timestamp
+        WHERE instance_id = ?
+        """,
+        [STATE_PENDING, instance_id],
+    )
+    _refresh_current_step_pointer(conn, instance_id, version_id)
+    progress = instance_progress(conn, instance_id, version_id)
+    first_stage = progress["stages"][0] if progress["stages"] else []
+    for step in first_stage:
+        _log_history(conn, instance_id, None, step["step_id"], "advance")
+    return {
+        "ok": True,
+        "reason": None,
+        "instance_id": instance_id,
+        "newly_actionable": first_stage,
+        "is_complete": progress["is_complete"],
+        "progress": progress,
+    }
 
 
 def get_instance(conn: duckdb.DuckDBPyConnection, instance_id: int) -> dict | None:
@@ -459,94 +867,6 @@ def list_instances(conn: duckdb.DuckDBPyConnection, version_id: int | None = Non
     ]
 
 
-def set_current_step(
-    conn: duckdb.DuckDBPyConnection,
-    instance_id: int,
-    step_id: int,
-    note: str | None = None,
-    actor: str | None = None,
-) -> str:
-    """Moves an instance to `step_id` and logs the move to
-    workflow_instance_history - every click that changes an instance's
-    current step is audited automatically, no extra step required. `action`
-    is inferred from step_order: moving to an earlier step than the one you
-    were on is logged as a "reject" (a formal send-back), anything else as
-    an "advance". There's no login system in this app, so `actor` is
-    whatever the user optionally typed, not an authenticated identity.
-
-    Returns that same `action` ("advance" | "reject") so callers - notably
-    callbacks.py, sending the step-change notification right after this
-    call - don't have to re-derive it from step_order themselves.
-    """
-    row = conn.execute(
-        "SELECT current_step_id, version_id FROM workflow_instance WHERE instance_id = ?", [instance_id]
-    ).fetchone()
-    from_step_id = row[0] if row else None
-    version_id = row[1] if row else None
-
-    action = "advance"
-    if from_step_id is not None and version_id is not None and from_step_id != step_id:
-        orders = dict(
-            conn.execute(
-                "SELECT step_id, step_order FROM workflow_step WHERE version_id = ? AND step_id IN (?, ?)",
-                [version_id, from_step_id, step_id],
-            ).fetchall()
-        )
-        if step_id in orders and from_step_id in orders and orders[step_id] < orders[from_step_id]:
-            action = "reject"
-
-    conn.execute(
-        "UPDATE workflow_instance SET current_step_id = ?, updated_at = current_timestamp WHERE instance_id = ?",
-        [step_id, instance_id],
-    )
-    conn.execute(
-        """
-        INSERT INTO workflow_instance_history (instance_id, from_step_id, to_step_id, action, note, actor)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        [instance_id, from_step_id, step_id, action, note or None, actor or None],
-    )
-    return action
-
-
-def skip_current_step(conn: duckdb.DuckDBPyConnection, instance_id: int) -> int | None:
-    """Advances an instance past its current step without needing that
-    role's action - only when the current step is marked optional
-    (workflow_step.is_optional). Returns None (a no-op the caller should
-    surface as a message) if the current step isn't optional, or there's no
-    next step to move to - otherwise the new current_step_id, so callers -
-    notably callbacks.py, sending the step-change notification right after
-    this call - don't have to look it back up.
-    """
-    row = conn.execute(
-        """
-        SELECT i.current_step_id, i.version_id, s.step_order, s.is_optional
-        FROM workflow_instance i
-        LEFT JOIN workflow_step s ON s.step_id = i.current_step_id
-        WHERE i.instance_id = ?
-        """,
-        [instance_id],
-    ).fetchone()
-    if row is None or row[0] is None or not row[3]:
-        return None
-    current_step_id, version_id, step_order, _ = row
-    next_step = conn.execute(
-        "SELECT step_id FROM workflow_step WHERE version_id = ? AND step_order > ? ORDER BY step_order LIMIT 1",
-        [version_id, step_order],
-    ).fetchone()
-    if next_step is None:
-        return None
-    conn.execute(
-        "UPDATE workflow_instance SET current_step_id = ?, updated_at = current_timestamp WHERE instance_id = ?",
-        [next_step[0], instance_id],
-    )
-    conn.execute(
-        "INSERT INTO workflow_instance_history (instance_id, from_step_id, to_step_id, action) VALUES (?, ?, ?, 'skip')",
-        [instance_id, current_step_id, next_step[0]],
-    )
-    return next_step[0]
-
-
 def add_history_note(conn: duckdb.DuckDBPyConnection, history_id: int, note: str) -> None:
     conn.execute("UPDATE workflow_instance_history SET note = ? WHERE history_id = ?", [note, history_id])
 
@@ -599,7 +919,90 @@ def delete_instance(conn: duckdb.DuckDBPyConnection, instance_id: int) -> None:
     # current_step_id) - deleting them explicitly here keeps the history
     # table from accumulating rows about instances that no longer exist.
     conn.execute("DELETE FROM workflow_instance_history WHERE instance_id = ?", [instance_id])
+    conn.execute("DELETE FROM workflow_instance_step_state WHERE instance_id = ?", [instance_id])
     conn.execute("DELETE FROM workflow_instance WHERE instance_id = ?", [instance_id])
+
+
+# ---- Scheduled kick-offs ----
+
+
+def create_schedule(conn: duckdb.DuckDBPyConnection, version_id: int, run_at: datetime) -> int:
+    return conn.execute(
+        "INSERT INTO workflow_schedule (version_id, run_at) VALUES (?, ?) RETURNING schedule_id",
+        [version_id, run_at],
+    ).fetchone()[0]
+
+
+def list_schedules(conn: duckdb.DuckDBPyConnection, version_id: int | None = None) -> list[dict]:
+    query = """
+        SELECT sc.schedule_id, sc.version_id, v.name, sc.run_at,
+               COALESCE(sc.enabled, true), sc.last_run_at, sc.created_at
+        FROM workflow_schedule sc
+        JOIN workflow_version v ON v.version_id = sc.version_id
+    """
+    params: list = []
+    if version_id is not None:
+        query += " WHERE sc.version_id = ?"
+        params.append(version_id)
+    query += " ORDER BY sc.run_at"
+    return [
+        {
+            "schedule_id": r[0],
+            "version_id": r[1],
+            "version_name": r[2],
+            "run_at": r[3],
+            "enabled": bool(r[4]),
+            "last_run_at": r[5],
+            "created_at": r[6],
+        }
+        for r in conn.execute(query, params).fetchall()
+    ]
+
+
+def set_schedule_enabled(conn: duckdb.DuckDBPyConnection, schedule_id: int, enabled: bool) -> None:
+    conn.execute("UPDATE workflow_schedule SET enabled = ? WHERE schedule_id = ?", [enabled, schedule_id])
+
+
+def delete_schedule(conn: duckdb.DuckDBPyConnection, schedule_id: int) -> None:
+    conn.execute("DELETE FROM workflow_schedule WHERE schedule_id = ?", [schedule_id])
+
+
+def due_schedules(conn: duckdb.DuckDBPyConnection, now: datetime | None = None) -> list[dict]:
+    """Enabled schedules whose run_at has passed and that haven't fired yet.
+
+    "Haven't fired yet" is last_run_at IS NULL OR last_run_at < run_at, not
+    a simple "did we run today" - that's what makes a missed schedule fire
+    once on the next dashboard open (catch-up) while making it impossible
+    for one to fire twice, however often the tick checks.
+    """
+    now = now or datetime.now()
+    return [
+        {
+            "schedule_id": r[0],
+            "version_id": r[1],
+            "version_name": r[2],
+            "run_at": r[3],
+        }
+        for r in conn.execute(
+            """
+            SELECT sc.schedule_id, sc.version_id, v.name, sc.run_at
+            FROM workflow_schedule sc
+            JOIN workflow_version v ON v.version_id = sc.version_id
+            WHERE COALESCE(sc.enabled, true)
+              AND sc.run_at <= ?
+              AND (sc.last_run_at IS NULL OR sc.last_run_at < sc.run_at)
+            ORDER BY sc.run_at
+            """,
+            [now],
+        ).fetchall()
+    ]
+
+
+def mark_schedule_run(conn: duckdb.DuckDBPyConnection, schedule_id: int, when: datetime | None = None) -> None:
+    conn.execute(
+        "UPDATE workflow_schedule SET last_run_at = ? WHERE schedule_id = ?",
+        [when or datetime.now(), schedule_id],
+    )
 
 
 def step_status_summary(conn: duckdb.DuckDBPyConnection, version_id: int) -> list[dict]:
@@ -609,39 +1012,64 @@ def step_status_summary(conn: duckdb.DuckDBPyConnection, version_id: int) -> lis
     those are overdue against the step's own sla_days. This is deliberately
     scoped to one version rather than "all instances everywhere," matching
     every other view in this app (see _load_view).
+
+    Counts come from workflow_instance_step_state, not from the old
+    current_step_id pointer: with parallel stages several steps are legit-
+    imately "waiting on someone" at the same moment, which a single pointer
+    could never show. A step counts as pending only when it is genuinely
+    actionable (its stage's turn has come and it isn't approved yet) - a
+    step further down the workflow that simply hasn't been reached is not
+    work anybody is sitting on, so it doesn't inflate the count. Overdue is
+    measured from that step's own state timestamp, i.e. how long this
+    person has had it, not how long the whole instance has been running.
     """
+    progress_by_step: dict = {}
+    for row in conn.execute(
+        "SELECT instance_id FROM workflow_instance WHERE version_id = ?", [version_id]
+    ).fetchall():
+        progress = instance_progress(conn, row[0], version_id)
+        for stage in progress["stages"]:
+            for step in stage:
+                if step["is_actionable"]:
+                    progress_by_step.setdefault(step["step_id"], []).append(step)
+
     rows = conn.execute(
         """
         SELECT s.step_id, s.step_order, COALESCE(s.label, r.role_name) AS label,
-               r.color_hex, r.assignee_name, r.assignee_email, s.sla_days,
-               count(i.instance_id) AS pending_count,
-               count(*) FILTER (
-                   WHERE s.sla_days IS NOT NULL
-                     AND date_diff('day', i.updated_at, current_timestamp) > s.sla_days
-               ) AS overdue_count
+               r.color_hex, r.assignee_name, r.assignee_email, s.sla_days
         FROM workflow_step s
         JOIN dim_role r ON r.role_id = s.role_id
-        LEFT JOIN workflow_instance i ON i.current_step_id = s.step_id
         WHERE s.version_id = ?
-        GROUP BY s.step_id, s.step_order, s.label, r.role_name, r.color_hex, r.assignee_name, r.assignee_email, s.sla_days
-        ORDER BY s.step_order
+        ORDER BY s.step_order, COALESCE(s.lane, 0), s.step_id
         """,
         [version_id],
     ).fetchall()
-    return [
-        {
-            "step_id": r[0],
-            "step_order": r[1],
-            "label": r[2],
-            "color_hex": r[3],
-            "assignee_name": r[4],
-            "assignee_email": r[5],
-            "sla_days": r[6],
-            "pending_count": r[7],
-            "overdue_count": r[8],
-        }
-        for r in rows
-    ]
+
+    summary = []
+    for r in rows:
+        step_id, stage, label, color_hex, assignee_name, assignee_email, sla_days = r
+        waiting = progress_by_step.get(step_id, [])
+        overdue = 0
+        if sla_days:
+            for step in waiting:
+                updated_at = step.get("state_updated_at")
+                if updated_at and (datetime.now() - updated_at).days > sla_days:
+                    overdue += 1
+        summary.append(
+            {
+                "step_id": step_id,
+                "step_order": stage,
+                "stage": stage,
+                "label": label,
+                "color_hex": color_hex,
+                "assignee_name": assignee_name,
+                "assignee_email": assignee_email,
+                "sla_days": sla_days,
+                "pending_count": len(waiting),
+                "overdue_count": overdue,
+            }
+        )
+    return summary
 
 
 def export_version_json(conn: duckdb.DuckDBPyConnection, version_id: int) -> str:
@@ -660,6 +1088,11 @@ def export_version_json(conn: duckdb.DuckDBPyConnection, version_id: int) -> str
         "steps": [
             {
                 "role_name": s["role_name"],
+                # Carrying stage/lane is what makes a parallel design survive
+                # an export/import round trip - without them every branch
+                # would come back as its own sequential stage.
+                "stage": s["stage"],
+                "lane": s["lane"],
                 "label": s["label"] if s["label"] != s["role_name"] else None,
                 "owner": s["owner"],
                 "duty": s["duty"],
@@ -690,14 +1123,29 @@ def import_version_json(
     roles_by_name = {r["role_name"]: r for r in list_roles(conn)}
     order = 0
     skipped_roles = []
+    # A file exported before parallel stages existed has no "stage" key at
+    # all - falling back to a running counter reproduces exactly the old
+    # one-step-per-stage linear shape, so old exports still import cleanly.
+    stage_numbers: dict = {}
     for step in payload.get("steps", []):
         role = roles_by_name.get(step.get("role_name"))
         if role is None:
             skipped_roles.append(step.get("role_name"))
             continue
+        raw_stage = step.get("stage")
+        if raw_stage is None:
+            raw_stage = order
+        if raw_stage not in stage_numbers:
+            stage_numbers[raw_stage] = len(stage_numbers)
         step_id = conn.execute(
-            "INSERT INTO workflow_step (version_id, role_id, step_order, label) VALUES (?, ?, ?, ?) RETURNING step_id",
-            [version_id, role["role_id"], order, step.get("label") or None],
+            "INSERT INTO workflow_step (version_id, role_id, step_order, lane, label) VALUES (?, ?, ?, ?, ?) RETURNING step_id",
+            [
+                version_id,
+                role["role_id"],
+                stage_numbers[raw_stage],
+                step.get("lane") or 0,
+                step.get("label") or None,
+            ],
         ).fetchone()[0]
         update_step_details(
             conn,

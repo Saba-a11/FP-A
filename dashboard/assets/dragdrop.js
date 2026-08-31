@@ -16,6 +16,18 @@
  * array). dash_clientside.set_props() pushes a serializable copy into the
  * workflow-steps-store any time it changes, so the "Save Changes" button's
  * Python callback can read it as normal Dash State.
+ *
+ * STAGES (parallel branches). Each step carries a `stage` number, and every
+ * step sharing a stage is one column on the canvas - they all run at once,
+ * and the next column can't start until every chip in this one is approved
+ * (see sql/schema.sql and workflow.instance_progress). The canvas therefore
+ * renders columns, not a single row, and offers two kinds of drop target:
+ *
+ *   .fpa-stage  - drop here to add a parallel branch to THIS column
+ *   .fpa-gap    - drop here to open a NEW column at this position
+ *
+ * A plain linear workflow is just the case where every column holds one
+ * chip, so nothing about the old behaviour had to change for the user.
  */
 
 (function () {
@@ -47,6 +59,43 @@
     return div.innerHTML;
   }
 
+  // Groups the flat step array into one array per stage. Relies on the array
+  // already being stage-sorted, which normalize() below guarantees after
+  // every mutation.
+  function stageGroups() {
+    var groups = [];
+    var currentStage = null;
+    window.__fpaSteps.forEach(function (step) {
+      if (step.stage !== currentStage) {
+        groups.push([]);
+        currentStage = step.stage;
+      }
+      groups[groups.length - 1].push(step);
+    });
+    return groups;
+  }
+
+  // Re-sorts by stage and rewrites stage/lane to a dense 0..n-1 so the array
+  // is always in canonical form - callers only have to place a chip roughly
+  // ("stage 2.5" to mean between 2 and 3 is not allowed, they shift instead)
+  // and never have to think about gaps left by a removed column.
+  // Array.prototype.sort is stable (ES2019), so chips inside one stage keep
+  // the relative order they were given.
+  function normalize() {
+    window.__fpaSteps.sort(function (a, b) {
+      return a.stage - b.stage;
+    });
+    var flat = [];
+    stageGroups().forEach(function (group, stageIndex) {
+      group.forEach(function (step, lane) {
+        step.stage = stageIndex;
+        step.lane = lane;
+        flat.push(step);
+      });
+    });
+    window.__fpaSteps = flat;
+  }
+
   // Re-read the authoritative payload whenever Dash has changed it (version
   // switch, create, activate, or Save all update its data-version-id/
   // data-steps together) and repaint #fpa-canvas from it.
@@ -69,19 +118,25 @@
     } catch (err) {
       parsed = [];
     }
-    window.__fpaSteps = parsed.map(function (s) {
+    window.__fpaSteps = parsed.map(function (s, index) {
       return {
         key: "s" + s.step_id,
         role_id: s.role_id,
         role_name: s.role_name,
         color_hex: s.color_hex,
         label: s.label,
+        // A payload from before stages existed carries no `stage` - falling
+        // back to the chip's index reproduces the old one-per-column linear
+        // layout exactly, so nothing breaks on an old design.
+        stage: s.stage == null ? index : s.stage,
+        lane: s.lane == null ? 0 : s.lane,
       };
     });
+    normalize();
     render();
   }
 
-  function chipHtml(step, index) {
+  function chipHtml(step) {
     // Mirrors layout.build_canvas_children's markup exactly (neutral card +
     // --role-color custom property + .fpa-role-badge showing the role's
     // initial) - the two must never drift apart, since this is what
@@ -101,12 +156,54 @@
       '" data-label="' +
       escapeHtml(step.label) +
       '">' +
-      '<span class="fpa-step-index">' + (index + 1) + "</span>" +
       '<span class="fpa-role-badge">' + escapeHtml(badgeInitial) + "</span>" +
       "<span>" + escapeHtml(step.label) + "</span>" +
       '<button type="button" class="fpa-remove" data-key="' + escapeHtml(step.key) + '" title="حذف مرحله">×</button>' +
       "</div>"
     );
+  }
+
+  // The "open a NEW stage here" target between two columns. Rendered as a
+  // permanently visible dashed lane rather than a bare hairline: the first
+  // version of this was an 18px gap showing only an arrow, and the boundary
+  // between one stage and the next was invisible - there was no way to tell
+  // where to drop for "runs after" versus "runs alongside".
+  function gapHtml(gapIndex) {
+    return (
+      '<div class="fpa-gap" data-gap="' + gapIndex + '" title="نقش را اینجا رها کنید تا یک مرحله‌ی جدید ساخته شود">' +
+      '<div class="fpa-gap-line"></div>' +
+      '<div class="fpa-gap-badge">+</div>' +
+      '<div class="fpa-gap-label">مرحله‌ی جدید</div>' +
+      '<div class="fpa-gap-line"></div>' +
+      "</div>"
+    );
+  }
+
+  function stageHtml(group, stageIndex) {
+    var isParallel = group.length > 1;
+    var parts = [
+      '<div class="fpa-stage' + (isParallel ? " fpa-stage-parallel" : "") + '" data-stage="' + stageIndex + '">',
+      '<div class="fpa-stage-head">',
+      '<span class="fpa-stage-num">مرحله ' + (stageIndex + 1) + "</span>",
+      isParallel ? '<span class="fpa-stage-tag">همزمان · ' + group.length + " نفر</span>" : "",
+      "</div>",
+      '<div class="fpa-stage-body">',
+    ];
+    group.forEach(function (step) {
+      parts.push(chipHtml(step));
+    });
+    // The explicit "add to THIS stage" target. Always present, so joining an
+    // existing stage is a visible affordance rather than something you have
+    // to guess by aiming at a column.
+    parts.push(
+      '<div class="fpa-stage-drop">+ افزودن نقش به این مرحله<span class="fpa-stage-drop-sub">همزمان با بقیه</span></div>'
+    );
+    parts.push("</div>");
+    if (isParallel) {
+      parts.push('<div class="fpa-stage-note">هر ' + group.length + ' نفر باید تایید کنند</div>');
+    }
+    parts.push("</div>");
+    return parts.join("");
   }
 
   function render() {
@@ -118,12 +215,66 @@
       return;
     }
     var parts = [];
-    window.__fpaSteps.forEach(function (step, i) {
-      if (i > 0) parts.push('<span class="fpa-arrow">→</span>');
-      parts.push(chipHtml(step, i));
+    var groups = stageGroups();
+    parts.push(gapHtml(0));
+    groups.forEach(function (group, stageIndex) {
+      parts.push(stageHtml(group, stageIndex));
+      parts.push(gapHtml(stageIndex + 1));
     });
     canvas.innerHTML = parts.join("");
+    fitCanvas();
   }
+
+  // Below this the flow would be unreadable, so rather than shrink further
+  // the viewport gives up and scrolls - a deliberate last resort for an
+  // extreme design (roughly 14+ stages on a normal screen), not the normal
+  // path. Everything realistic fits above it: a 7-stage workflow lands
+  // around 0.55.
+  var FPA_MIN_SCALE = 0.35;
+
+  // Scale the whole flow down until it fits the available width, so every
+  // stage stays visible on one line instead of running off behind a
+  // scrollbar. Measures at scale 1 first, because scrollWidth of an already
+  // transformed element still reports layout (untransformed) size in some
+  // engines and reading it mid-transform makes the result drift on repeated
+  // calls.
+  function fitCanvas() {
+    var viewport = document.getElementById("fpa-canvas-viewport");
+    var scaler = document.getElementById("fpa-canvas-scaler");
+    if (!viewport || !scaler) return;
+
+    scaler.style.transform = "none";
+    scaler.style.width = "max-content";
+    var naturalWidth = scaler.scrollWidth;
+    var naturalHeight = scaler.scrollHeight;
+    var available = viewport.clientWidth;
+    if (!naturalWidth || !available) return;
+
+    var scale = available / naturalWidth;
+    if (scale >= 1) {
+      scale = 1;
+    } else if (scale < FPA_MIN_SCALE) {
+      scale = FPA_MIN_SCALE;
+    }
+
+    scaler.style.transform = scale === 1 ? "none" : "scale(" + scale + ")";
+    // The transform is purely visual - it does not change layout size - so
+    // the viewport would otherwise keep reserving the full untransformed
+    // height and leave a gap under the flow.
+    viewport.style.height = Math.ceil(naturalHeight * scale) + "px";
+    viewport.style.overflowX = naturalWidth * scale > available + 1 ? "auto" : "hidden";
+  }
+
+  window.addEventListener("resize", function () {
+    // Coalesce the burst of resize events a window drag produces into one
+    // measure-and-scale pass per frame.
+    if (window.__fpaFitPending) return;
+    window.__fpaFitPending = true;
+    window.requestAnimationFrame(function () {
+      window.__fpaFitPending = false;
+      fitCanvas();
+    });
+  });
 
   function pushToStore() {
     if (!(window.dash_clientside && window.dash_clientside.set_props)) return;
@@ -133,34 +284,15 @@
     // owner/duty/template survive a re-save instead of being wiped every
     // time the canvas changes. See workflow.save_steps.
     var payload = window.__fpaSteps.map(function (s) {
-      return { role_id: s.role_id, label: s.label, key: s.key };
+      return { role_id: s.role_id, label: s.label, key: s.key, stage: s.stage, lane: s.lane };
     });
     window.dash_clientside.set_props("workflow-steps-store", { data: payload });
   }
 
   function commit() {
+    normalize();
     render();
     pushToStore();
-  }
-
-  // Index among the CURRENT chips (excluding the one being dragged, if any)
-  // that a horizontal mouse position falls into, based on each chip's
-  // midpoint - the standard "insert between the two nearest chips" rule.
-  function dropIndexForX(clientX, excludeKey) {
-    var canvas = document.getElementById("fpa-canvas");
-    var chips = canvas ? Array.prototype.slice.call(canvas.querySelectorAll(".fpa-chip")) : [];
-    var visibleIndex = 0;
-    for (var i = 0; i < chips.length; i++) {
-      var chip = chips[i];
-      if (excludeKey && chip.getAttribute("data-key") === excludeKey) continue;
-      var rect = chip.getBoundingClientRect();
-      var midpoint = rect.left + rect.width / 2;
-      if (clientX < midpoint) {
-        return visibleIndex;
-      }
-      visibleIndex += 1;
-    }
-    return visibleIndex;
   }
 
   function keyIndex(key) {
@@ -168,6 +300,33 @@
       if (window.__fpaSteps[i].key === key) return i;
     }
     return -1;
+  }
+
+  // Makes room for a brand-new column at `gapIndex` by pushing every stage
+  // from there on one to the right. The caller then places its chip at
+  // exactly `gapIndex`, and normalize() closes any numbering gap.
+  function shiftStagesFrom(gapIndex) {
+    window.__fpaSteps.forEach(function (step) {
+      if (step.stage >= gapIndex) step.stage += 1;
+    });
+  }
+
+  // Where did this drop land? Returns {type: "stage", index} for a drop onto
+  // an existing column (add a parallel branch), or {type: "gap", index} for
+  // a drop between columns (open a new one), or null if neither.
+  function dropTargetFrom(event) {
+    if (!event.target.closest) return null;
+    var gap = event.target.closest(".fpa-gap");
+    if (gap) return { type: "gap", index: parseInt(gap.getAttribute("data-gap"), 10) };
+    var stage = event.target.closest(".fpa-stage");
+    if (stage) return { type: "stage", index: parseInt(stage.getAttribute("data-stage"), 10) };
+    // Dropped on the dropzone but not on any specific target (e.g. the empty
+    // canvas, or the padding around the columns) - append as a new last
+    // stage, which is what "just drop it on the canvas" should obviously do.
+    if (event.target.closest("#fpa-canvas-dropzone")) {
+      return { type: "gap", index: stageGroups().length };
+    }
+    return null;
   }
 
   document.addEventListener("dragstart", function (e) {
@@ -191,27 +350,44 @@
   });
 
   document.addEventListener("dragend", function () {
-    var dragging = document.querySelectorAll(".fpa-chip.fpa-dragging");
-    dragging.forEach(function (el) {
+    document.querySelectorAll(".fpa-chip.fpa-dragging").forEach(function (el) {
       el.classList.remove("fpa-dragging");
     });
+    clearDropHighlights();
   });
+
+  function clearDropHighlights() {
+    document.querySelectorAll(".fpa-drag-over").forEach(function (el) {
+      el.classList.remove("fpa-drag-over");
+    });
+  }
 
   document.addEventListener("dragover", function (e) {
     var dropzone = e.target.closest ? e.target.closest("#fpa-canvas-dropzone") : null;
     var trash = e.target.closest ? e.target.closest("#fpa-trash-zone") : null;
-    if (dropzone || trash) {
-      e.preventDefault();
-      if (dropzone) dropzone.classList.add("fpa-drag-over");
-      if (trash) trash.classList.add("fpa-drag-over");
+    if (!dropzone && !trash) return;
+    e.preventDefault();
+    clearDropHighlights();
+    if (trash) {
+      trash.classList.add("fpa-drag-over");
+      return;
     }
+    // Highlight the specific column or gap under the cursor, not the whole
+    // canvas - with parallel stages the user needs to see *which* column a
+    // chip is about to join, since that is the difference between "runs
+    // alongside these people" and "runs after them".
+    var target = dropTargetFrom(e);
+    if (!target) return;
+    var selector = target.type === "gap" ? ".fpa-gap[data-gap='" : ".fpa-stage[data-stage='";
+    var el = document.querySelector(selector + target.index + "']");
+    if (el) el.classList.add("fpa-drag-over");
+    else dropzone.classList.add("fpa-drag-over");
   });
 
   document.addEventListener("dragleave", function (e) {
-    var dropzone = document.getElementById("fpa-canvas-dropzone");
-    var trash = document.getElementById("fpa-trash-zone");
-    if (dropzone && e.target === dropzone) dropzone.classList.remove("fpa-drag-over");
-    if (trash && e.target === trash) trash.classList.remove("fpa-drag-over");
+    if (e.target.classList && e.target.classList.contains("fpa-drag-over")) {
+      e.target.classList.remove("fpa-drag-over");
+    }
   });
 
   document.addEventListener("drop", function (e) {
@@ -227,43 +403,45 @@
     } catch (err) {
       return;
     }
-
-    var dz = document.getElementById("fpa-canvas-dropzone");
-    var tz = document.getElementById("fpa-trash-zone");
-    if (dz) dz.classList.remove("fpa-drag-over");
-    if (tz) tz.classList.remove("fpa-drag-over");
+    clearDropHighlights();
 
     if (trash) {
       if (data.source === "canvas") {
-        var idx = keyIndex(data.key);
-        if (idx !== -1) {
+        var trashIndex = keyIndex(data.key);
+        if (trashIndex !== -1) {
           pushHistory();
-          window.__fpaSteps.splice(idx, 1);
+          window.__fpaSteps.splice(trashIndex, 1);
           commit();
         }
       }
       return;
     }
 
+    var target = dropTargetFrom(e);
+    if (!target) return;
+
     if (data.source === "palette") {
       pushHistory();
-      var insertAt = dropIndexForX(e.clientX, null);
-      window.__fpaSteps.splice(insertAt, 0, {
+      if (target.type === "gap") shiftStagesFrom(target.index);
+      window.__fpaSteps.push({
         key: newKey(),
         role_id: data.role_id,
         role_name: data.role_name,
         color_hex: data.color_hex,
         label: data.role_name,
+        stage: target.index,
+        lane: 999, // sorted into place by normalize() - appends to the column
       });
       commit();
     } else if (data.source === "canvas") {
       var fromIndex = keyIndex(data.key);
       if (fromIndex === -1) return;
       pushHistory();
-      var target = dropIndexForX(e.clientX, data.key);
       var moved = window.__fpaSteps.splice(fromIndex, 1)[0];
-      if (target > fromIndex) target -= 1;
-      window.__fpaSteps.splice(target, 0, moved);
+      if (target.type === "gap") shiftStagesFrom(target.index);
+      moved.stage = target.index;
+      moved.lane = 999;
+      window.__fpaSteps.push(moved);
       commit();
     }
   });
@@ -294,6 +472,9 @@
 
   function boot() {
     syncFromServerIfNeeded();
+    // The very first paint comes from Dash (layout.build_canvas_children),
+    // not from render(), so nothing has called fitCanvas() for it yet.
+    fitCanvas();
     var root = document.getElementById("fpa-app-root");
     if (root) {
       // Observes #fpa-app-root (subtree: true), not #fpa-steps-payload

@@ -65,6 +65,7 @@ def create_app() -> dash.Dash:
         instances = [workflow.get_or_create_instance(conn, selected_version_id)]
         status_summary = workflow.step_status_summary(conn, selected_version_id)
         history_by_instance = {i["instance_id"]: workflow.list_instance_history(conn, i["instance_id"]) for i in instances}
+        progress = workflow.instance_progress(conn, instances[0]["instance_id"], selected_version_id)
         return layout.build_shell(
             roles,
             versions,
@@ -72,6 +73,8 @@ def create_app() -> dash.Dash:
             instances,
             status_summary=status_summary,
             history_by_instance=history_by_instance,
+            progress=progress,
+            schedules=workflow.list_schedules(conn),
         )
 
     app.layout = serve_layout
