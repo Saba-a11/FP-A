@@ -1072,6 +1072,205 @@ def step_status_summary(conn: duckdb.DuckDBPyConnection, version_id: int) -> lis
     return summary
 
 
+# ---- Reports ----
+#
+# Everything here is a plain read over data the app already records - the
+# audit trail (workflow_instance_history) and per-step state. No model, no
+# API call, no network: the questions people actually ask about a finished
+# or stuck workflow ("why did this come back", "which step causes the
+# rework") are structured questions, and structured queries answer them
+# exactly rather than approximately.
+
+
+def activity_summary(conn: duckdb.DuckDBPyConnection, version_id: int) -> dict:
+    """Headline counts for one workflow: how much was approved, sent back,
+    skipped, and how much is open right now."""
+    row = conn.execute(
+        """
+        SELECT
+            count(*) FILTER (WHERE h.action = 'approve') AS approvals,
+            count(*) FILTER (WHERE h.action = 'reject')  AS rejections,
+            count(*) FILTER (WHERE h.action = 'skip')    AS skips,
+            min(h.created_at)                            AS first_event,
+            max(h.created_at)                            AS last_event
+        FROM workflow_instance_history h
+        JOIN workflow_instance i ON i.instance_id = h.instance_id
+        WHERE i.version_id = ?
+        """,
+        [version_id],
+    ).fetchone()
+
+    open_steps = 0
+    is_complete = False
+    for (instance_id,) in conn.execute(
+        "SELECT instance_id FROM workflow_instance WHERE version_id = ?", [version_id]
+    ).fetchall():
+        progress = instance_progress(conn, instance_id, version_id)
+        open_steps += len(progress["actionable_ids"])
+        is_complete = progress["is_complete"]
+
+    # A reject writes one history row per step of the stage it returns to, so
+    # a send-back to a 3-branch stage would otherwise read as 3 rejections.
+    # Counting distinct moments is what makes "2 rejections" mean what a
+    # person means by it.
+    distinct_rejections = conn.execute(
+        """
+        SELECT count(DISTINCT (h.from_step_id, h.created_at))
+        FROM workflow_instance_history h
+        JOIN workflow_instance i ON i.instance_id = h.instance_id
+        WHERE i.version_id = ? AND h.action = 'reject'
+        """,
+        [version_id],
+    ).fetchone()[0]
+
+    return {
+        "approvals": row[0] or 0,
+        "rejections": distinct_rejections or 0,
+        "skips": row[2] or 0,
+        "first_event": row[3],
+        "last_event": row[4],
+        "open_steps": open_steps,
+        "is_complete": is_complete,
+    }
+
+
+def rejection_log(conn: duckdb.DuckDBPyConnection, version_id: int, limit: int = 50) -> list[dict]:
+    """Every send-back, newest first, with the explanation its author had to
+    write (reject_step refuses an empty note) - this is the report that
+    answers "why did this come back?" directly, in the rejecter's own words.
+
+    Grouped by the moment of rejection rather than by history row: one
+    rejection into a parallel stage writes one row per step it returned to,
+    and a reader wants to see that as a single event with several recipients.
+    """
+    rows = conn.execute(
+        """
+        SELECT h.created_at,
+               h.from_step_id,
+               COALESCE(fs.label, fr.role_name) AS from_label,
+               fr.color_hex                     AS from_color,
+               h.note,
+               h.actor,
+               string_agg(COALESCE(ts.label, tr.role_name), '، ') AS to_labels
+        FROM workflow_instance_history h
+        JOIN workflow_instance i  ON i.instance_id = h.instance_id
+        LEFT JOIN workflow_step fs ON fs.step_id = h.from_step_id
+        LEFT JOIN dim_role fr      ON fr.role_id = fs.role_id
+        LEFT JOIN workflow_step ts ON ts.step_id = h.to_step_id
+        LEFT JOIN dim_role tr      ON tr.role_id = ts.role_id
+        WHERE i.version_id = ? AND h.action = 'reject'
+        GROUP BY h.created_at, h.from_step_id, fs.label, fr.role_name, fr.color_hex, h.note, h.actor
+        ORDER BY h.created_at DESC
+        LIMIT ?
+        """,
+        [version_id, limit],
+    ).fetchall()
+    return [
+        {
+            "created_at": r[0],
+            "from_step_id": r[1],
+            "from_label": r[2] or "مرحله‌ی حذف‌شده",
+            "from_color": r[3] or "#8b5cf6",
+            "note": r[4],
+            "actor": r[5],
+            "to_labels": r[6] or "—",
+        }
+        for r in rows
+    ]
+
+
+def rejections_by_step(conn: duckdb.DuckDBPyConnection, version_id: int) -> list[dict]:
+    """How often each step sent work back, and how often each step had work
+    sent back TO it - the two halves of "where does the rework happen".
+
+    Every step of the version appears, including zero-count ones, so the
+    report reads as a complete picture of the process rather than only of
+    its problem areas.
+    """
+    steps = conn.execute(
+        """
+        SELECT s.step_id, s.step_order, COALESCE(s.label, r.role_name), r.color_hex
+        FROM workflow_step s
+        JOIN dim_role r ON r.role_id = s.role_id
+        WHERE s.version_id = ?
+        ORDER BY s.step_order, COALESCE(s.lane, 0), s.step_id
+        """,
+        [version_id],
+    ).fetchall()
+
+    raised = dict(
+        conn.execute(
+            """
+            SELECT h.from_step_id, count(DISTINCT h.created_at)
+            FROM workflow_instance_history h
+            JOIN workflow_instance i ON i.instance_id = h.instance_id
+            WHERE i.version_id = ? AND h.action = 'reject' AND h.from_step_id IS NOT NULL
+            GROUP BY h.from_step_id
+            """,
+            [version_id],
+        ).fetchall()
+    )
+    received = dict(
+        conn.execute(
+            """
+            SELECT h.to_step_id, count(*)
+            FROM workflow_instance_history h
+            JOIN workflow_instance i ON i.instance_id = h.instance_id
+            WHERE i.version_id = ? AND h.action = 'reject'
+            GROUP BY h.to_step_id
+            """,
+            [version_id],
+        ).fetchall()
+    )
+
+    return [
+        {
+            "step_id": s[0],
+            "stage": s[1],
+            "label": s[2],
+            "color_hex": s[3],
+            "raised": raised.get(s[0], 0),
+            "received": received.get(s[0], 0),
+        }
+        for s in steps
+    ]
+
+
+def pending_durations(conn: duckdb.DuckDBPyConnection, version_id: int, now: datetime | None = None) -> list[dict]:
+    """How long each step that is waiting right now has been waiting, and
+    whether that is past its own sla_days.
+
+    Measured from the step's own state timestamp rather than the instance's,
+    because with parallel branches the instance timestamp moves whenever any
+    branch acts and would keep resetting everybody else's clock.
+    """
+    now = now or datetime.now()
+    out = []
+    for (instance_id,) in conn.execute(
+        "SELECT instance_id FROM workflow_instance WHERE version_id = ?", [version_id]
+    ).fetchall():
+        progress = instance_progress(conn, instance_id, version_id)
+        for stage in progress["stages"]:
+            for step in stage:
+                if not step["is_actionable"]:
+                    continue
+                since = step.get("state_updated_at")
+                days = (now - since).days if since else None
+                out.append(
+                    {
+                        "step_id": step["step_id"],
+                        "label": step["label"],
+                        "color_hex": step["color_hex"],
+                        "assignee_name": step.get("assignee_name"),
+                        "since": since,
+                        "days": days,
+                        "sla_days": step.get("sla_days"),
+                        "overdue": bool(step.get("sla_days") and days is not None and days > step["sla_days"]),
+                    }
+                )
+    return sorted(out, key=lambda s: (s["days"] is None, -(s["days"] or 0)))
+
+
 def export_version_json(conn: duckdb.DuckDBPyConnection, version_id: int) -> str:
     """A portable snapshot of one version's steps, keyed by role *name*
     (not role_id, which won't line up on a different database) - see

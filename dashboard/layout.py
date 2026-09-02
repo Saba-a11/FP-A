@@ -1429,6 +1429,251 @@ def build_settings_page(versions: list[dict], schedules: list[dict], roles: list
     )
 
 
+def build_stat_tiles(summary: dict):
+    """The headline counts. Deliberately NOT a chart: four independent
+    totals have no shape to compare, so a stat tile reads them faster than
+    any plot would. The number carries the meaning, the label carries the
+    identity, and colour is used only where a value has a real status
+    (rejections are critical-coloured, open work is accent-coloured) - never
+    as decoration.
+    """
+    tiles = [
+        ("تاییدها", summary["approvals"], GOOD_COLOR),
+        ("عدم تاییدها", summary["rejections"], CRITICAL_COLOR),
+        ("مراحل رد شده", summary["skips"], TEXT_MUTED),
+        ("در انتظار اقدام", summary["open_steps"], ACCENT),
+    ]
+    return html.Div(
+        style={"display": "flex", "gap": "12px", "flexWrap": "wrap"},
+        children=[
+            html.Div(
+                className="fpa-stat-tile",
+                style={"--tile-color": color},
+                children=[
+                    html.Div(str(value), className="fpa-stat-value"),
+                    html.Div(label, className="fpa-stat-label"),
+                ],
+            )
+            for label, value, color in tiles
+        ],
+    )
+
+
+def build_rejection_bars(rows: list[dict]):
+    """Which step sends work back, and which step receives it.
+
+    Bar length is the only magnitude encoding and every bar uses the SAME
+    hue - length answers "how often", so painting each bar a different
+    colour would be decoration competing with the data. Identity is carried
+    by the always-present label plus a small role-coloured dot, so it never
+    depends on colour alone. (The role palette cycles through five hues for
+    eight roles and its worst pair sits in the marginal CVD band, which is
+    exactly why identity here is label-first.)
+    """
+    active = [r for r in rows if r["raised"] or r["received"]]
+    if not active:
+        return html.Div(
+            "هنوز هیچ عدم تاییدی ثبت نشده - این گزارش پس از اولین بازگشت کار پر می‌شود.",
+            style={"color": TEXT_MUTED, "fontSize": "12.5px"},
+        )
+    peak = max(max(r["raised"], r["received"]) for r in active) or 1
+
+    def bar(value: int, color: str):
+        # A zero draws no fill at all. The fill carries min-width so a small
+        # non-zero value stays visible, and that same floor would otherwise
+        # render 0 as a 2px sliver - a value that isn't there looking like a
+        # value that is.
+        return html.Div(
+            className="fpa-bar-track",
+            children=(
+                html.Div(
+                    className="fpa-bar-fill",
+                    style={"width": f"{(value / peak) * 100:.1f}%", "background": color},
+                )
+                if value
+                else None
+            ),
+        )
+
+    header = html.Div(
+        className="fpa-bar-row fpa-bar-head",
+        children=[
+            html.Div("مرحله", style={"gridArea": "label"}),
+            html.Div("بازگشت داده", style={"gridArea": "a"}),
+            html.Div("بازگشت گرفته", style={"gridArea": "b"}),
+        ],
+    )
+    body = [
+        html.Div(
+            className="fpa-bar-row",
+            children=[
+                html.Div(
+                    style={"gridArea": "label", "display": "flex", "alignItems": "center", "gap": "7px", "minWidth": "0"},
+                    children=[
+                        html.Span(className="fpa-role-dot", style={"background": r["color_hex"]}),
+                        html.Span(r["label"], style={"fontSize": "12.5px", "fontWeight": "700"}),
+                    ],
+                ),
+                html.Div(
+                    style={"gridArea": "a", "display": "flex", "alignItems": "center", "gap": "8px"},
+                    children=[bar(r["raised"], CRITICAL_COLOR), html.Span(str(r["raised"]), className="fpa-bar-value")],
+                ),
+                html.Div(
+                    style={"gridArea": "b", "display": "flex", "alignItems": "center", "gap": "8px"},
+                    children=[bar(r["received"], ACCENT), html.Span(str(r["received"]), className="fpa-bar-value")],
+                ),
+            ],
+        )
+        for r in active
+    ]
+    return html.Div([header, *body])
+
+
+def build_rejection_log(rows: list[dict]):
+    """The report that answers "why did this come back?" - each send-back
+    with the explanation its author was required to write."""
+    if not rows:
+        return html.Div(
+            "هیچ عدم تاییدی ثبت نشده است.",
+            style={"color": TEXT_MUTED, "fontSize": "12.5px"},
+        )
+    entries = []
+    for r in rows:
+        meta = [f"{r['created_at']:%Y-%m-%d %H:%M}"]
+        if r["actor"]:
+            meta.append(r["actor"])
+        entries.append(
+            html.Div(
+                className="fpa-log-entry",
+                style={"--role-color": r["from_color"]},
+                children=[
+                    html.Div(
+                        style={"display": "flex", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"},
+                        children=[
+                            html.Span(r["from_label"], style={"fontWeight": "700", "fontSize": "12.5px"}),
+                            html.Span("←", style={"color": CRITICAL_COLOR, "fontWeight": "700"}),
+                            html.Span(r["to_labels"], style={"fontSize": "12.5px", "color": TEXT_SECONDARY}),
+                            html.Div(style={"flex": "1"}),
+                            html.Span(
+                                " · ".join(meta),
+                                style={"fontSize": "11px", "color": TEXT_MUTED, "direction": "ltr"},
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        f"« {r['note']} »" if r["note"] else "بدون توضیح",
+                        style={
+                            "fontSize": "12.5px",
+                            "color": TEXT_PRIMARY if r["note"] else TEXT_MUTED,
+                            "marginTop": "6px",
+                            "lineHeight": "1.8",
+                        },
+                    ),
+                ],
+            )
+        )
+    return html.Div(entries, style={"display": "flex", "flexDirection": "column", "gap": "8px"})
+
+
+def build_pending_table(rows: list[dict]):
+    """Who the workflow is waiting on right now, longest wait first."""
+    if not rows:
+        return html.Div(
+            "هیچ مرحله‌ای در انتظار اقدام نیست.",
+            style={"color": TEXT_MUTED, "fontSize": "12.5px"},
+        )
+    entries = []
+    for r in rows:
+        bits = []
+        if r["assignee_name"]:
+            bits.append(r["assignee_name"])
+        if r["days"] is not None:
+            bits.append(f"{r['days']} روز در انتظار")
+        if r["sla_days"]:
+            bits.append(f"مهلت {r['sla_days']} روز")
+        entries.append(
+            html.Div(
+                className="fpa-log-entry" + (" fpa-log-entry-overdue" if r["overdue"] else ""),
+                style={"--role-color": r["color_hex"]},
+                children=[
+                    html.Div(
+                        style={"display": "flex", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"},
+                        children=[
+                            html.Span(className="fpa-role-dot", style={"background": r["color_hex"]}),
+                            html.Span(r["label"], style={"fontWeight": "700", "fontSize": "12.5px"}),
+                            html.Div(style={"flex": "1"}),
+                            html.Span(
+                                "⚠ از مهلت گذشته" if r["overdue"] else "",
+                                style={"fontSize": "11px", "color": CRITICAL_COLOR, "fontWeight": "700"},
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        " · ".join(bits) if bits else "—",
+                        style={"fontSize": "11.5px", "color": TEXT_SECONDARY, "marginTop": "4px"},
+                    ),
+                ],
+            )
+        )
+    return html.Div(entries, style={"display": "flex", "flexDirection": "column", "gap": "8px"})
+
+
+def build_reports_page(reports: dict | None):
+    """The گزارش‌ها tab: what happened in this workflow and where it got stuck.
+
+    Every number here is read straight out of the audit trail the app already
+    writes - no model, no API key, no data leaving the machine.
+    """
+    reports = reports or {}
+    summary = reports.get("summary") or {
+        "approvals": 0, "rejections": 0, "skips": 0, "open_steps": 0, "is_complete": False,
+    }
+    return html.Div(
+        [
+            html.Div(
+                style={**CARD_STYLE, "marginBottom": "16px"},
+                children=[
+                    html.Div("خلاصه‌ی فعالیت — این گردش‌کار", style={"fontWeight": "600", "marginBottom": "12px"}),
+                    build_stat_tiles(summary),
+                ],
+            ),
+            html.Div(
+                style={**CARD_STYLE, "marginBottom": "16px"},
+                children=[
+                    html.Div("دلایل عدم تایید", style={"fontWeight": "600", "marginBottom": "2px"}),
+                    html.Div(
+                        "هر بار که کاری به مرحله‌ی قبل بازگردانده شده، همراه با توضیحی که نویسنده‌اش موظف بوده بنویسد. جدیدترین در بالا.",
+                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                    ),
+                    html.Div(id="report-rejection-log", children=build_rejection_log(reports.get("rejection_log") or [])),
+                ],
+            ),
+            html.Div(
+                style={**CARD_STYLE, "marginBottom": "16px"},
+                children=[
+                    html.Div("کجا دوباره‌کاری اتفاق می‌افتد", style={"fontWeight": "600", "marginBottom": "2px"}),
+                    html.Div(
+                        "«بازگشت داده» یعنی این مرحله کار را رد کرده؛ «بازگشت گرفته» یعنی کار به این مرحله بازگردانده شده.",
+                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                    ),
+                    html.Div(id="report-rejection-bars", children=build_rejection_bars(reports.get("by_step") or [])),
+                ],
+            ),
+            html.Div(
+                style={**CARD_STYLE},
+                children=[
+                    html.Div("در انتظار چه کسی هستیم", style={"fontWeight": "600", "marginBottom": "2px"}),
+                    html.Div(
+                        "مراحلی که همین حالا منتظر اقدام‌اند، طولانی‌ترین انتظار در بالا.",
+                        style={"color": TEXT_MUTED, "fontSize": "12px", "marginBottom": "14px"},
+                    ),
+                    html.Div(id="report-pending", children=build_pending_table(reports.get("pending") or [])),
+                ],
+            ),
+        ]
+    )
+
+
 def workflow_tab_button_class(tab_id: str, active_tab: str) -> str:
     return "fpa-workflow-tab fpa-workflow-tab-active" if tab_id == active_tab else "fpa-workflow-tab"
 
@@ -1448,6 +1693,12 @@ def build_workflow_tab_bar(active: str = "design"):
                 n_clicks=0,
                 className=workflow_tab_button_class("instances", active),
             ),
+            html.Button(
+                "گزارش‌ها",
+                id="workflow-tab-reports-btn",
+                n_clicks=0,
+                className=workflow_tab_button_class("reports", active),
+            ),
         ],
     )
 
@@ -1461,8 +1712,9 @@ def build_designer_page(
     history_by_instance: dict[int, list[dict]] | None = None,
     expanded_history_instance_id: int | None = None,
     progress: dict | None = None,
+    reports: dict | None = None,
 ):
-    # Two tabs, not one long scroll: "طراحی" (roles/canvas/step-detail) is
+    # Three tabs, not one long scroll: "طراحی" (roles/canvas/step-detail) is
     # what you touch while building a template, "نمونه‌های در حال اجرا" is
     # what you touch while tracking real cycles - these are different
     # moments of use, so showing both at once (the original design) was
@@ -1656,6 +1908,11 @@ def build_designer_page(
                         ],
                     ),
                 ],
+            ),
+            html.Div(
+                id="workflow-reports-tab",
+                style=workflow_tab_container_style(visible=False),
+                children=build_reports_page(reports),
             ),
         ]
     )
@@ -1898,6 +2155,7 @@ def build_module_content(
     expanded_history_instance_id: int | None = None,
     progress: dict | None = None,
     schedules: list[dict] | None = None,
+    reports: dict | None = None,
 ):
     if module_id in PLACEHOLDER_MODULES:
         return build_placeholder_module(module_id)
@@ -1912,6 +2170,7 @@ def build_module_content(
         history_by_instance,
         expanded_history_instance_id,
         progress=progress,
+        reports=reports,
     )
 
 
@@ -1926,6 +2185,7 @@ def build_shell(
     expanded_history_instance_id: int | None = None,
     progress: dict | None = None,
     schedules: list[dict] | None = None,
+    reports: dict | None = None,
 ):
     return html.Div(
         id="fpa-app-root",
@@ -2015,6 +2275,7 @@ def build_shell(
                             expanded_history_instance_id=expanded_history_instance_id,
                             progress=progress,
                             schedules=schedules,
+                            reports=reports,
                         ),
                     ),
                     # Ticks in the background for as long as the page is

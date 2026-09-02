@@ -75,6 +75,12 @@ def create_app() -> dash.Dash:
             history_by_instance=history_by_instance,
             progress=progress,
             schedules=workflow.list_schedules(conn),
+            reports={
+                "summary": workflow.activity_summary(conn, selected_version_id),
+                "rejection_log": workflow.rejection_log(conn, selected_version_id),
+                "by_step": workflow.rejections_by_step(conn, selected_version_id),
+                "pending": workflow.pending_durations(conn, selected_version_id),
+            },
         )
 
     app.layout = serve_layout

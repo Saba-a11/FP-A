@@ -69,6 +69,19 @@ def _render_instance_list(
     )
 
 
+def _reports_for(conn: duckdb.DuckDBPyConnection, version_id: int | None) -> dict | None:
+    """Everything the گزارش‌ها tab shows, for one workflow. Pure reads over
+    the audit trail - no model, no API key, nothing leaves the machine."""
+    if version_id is None:
+        return None
+    return {
+        "summary": workflow.activity_summary(conn, version_id),
+        "rejection_log": workflow.rejection_log(conn, version_id),
+        "by_step": workflow.rejections_by_step(conn, version_id),
+        "pending": workflow.pending_durations(conn, version_id),
+    }
+
+
 def _notify_steps(conn: duckdb.DuckDBPyConnection, instance_id: int, version_id: int, steps: list[dict], event: str, note: str | None = None) -> None:
     """Send one notification per step that just landed on someone's desk.
 
@@ -164,6 +177,7 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
                 status_summary=summary,
                 history_by_instance=_history_by_instance(conn, instances),
                 progress=_progress_for(conn, selected_version_id),
+                reports=_reports_for(conn, selected_version_id),
             )
         elif module_id == "settings":
             content = layout.build_module_content(
@@ -182,24 +196,43 @@ def register_callbacks(app, conn: duckdb.DuckDBPyConnection) -> None:
     @app.callback(
         Output("workflow-design-tab", "style"),
         Output("workflow-instances-tab", "style"),
+        Output("workflow-reports-tab", "style"),
         Output("workflow-tab-design-btn", "className"),
         Output("workflow-tab-instances-btn", "className"),
+        Output("workflow-tab-reports-btn", "className"),
+        Output("workflow-reports-tab", "children"),
         Input("workflow-tab-design-btn", "n_clicks"),
         Input("workflow-tab-instances-btn", "n_clicks"),
+        Input("workflow-tab-reports-btn", "n_clicks"),
+        State("version-picker", "value"),
         prevent_initial_call=True,
     )
-    def switch_workflow_tab(_design_clicks, _instances_clicks):
-        # Both tab bodies always exist in the DOM (see
+    def switch_workflow_tab(_design_clicks, _instances_clicks, _reports_clicks, version_id):
+        # All three tab bodies always exist in the DOM (see
         # layout.build_designer_page's docstring) - switching tabs is just
         # a style.display flip plus which tab button looks active, never a
         # re-render, so it's instant and can't hit the Dash-validator
         # "nonexistent Input" trap a conditionally-rendered tab would.
-        active = "instances" if ctx.triggered_id == "workflow-tab-instances-btn" else "design"
+        #
+        # The reports body is the one exception: it is recomputed on the way
+        # in, because it summarises history that every approve/reject writes
+        # to. Rebuilding it on each of those callbacks instead would mean
+        # recomputing four queries after every click for a tab nobody may be
+        # looking at.
+        tab_by_button = {
+            "workflow-tab-instances-btn": "instances",
+            "workflow-tab-reports-btn": "reports",
+        }
+        active = tab_by_button.get(ctx.triggered_id, "design")
+        reports = layout.build_reports_page(_reports_for(conn, version_id)) if active == "reports" else no_update
         return (
             layout.workflow_tab_container_style(visible=active == "design"),
             layout.workflow_tab_container_style(visible=active == "instances"),
+            layout.workflow_tab_container_style(visible=active == "reports"),
             layout.workflow_tab_button_class("design", active),
             layout.workflow_tab_button_class("instances", active),
+            layout.workflow_tab_button_class("reports", active),
+            reports,
         )
 
     @app.callback(

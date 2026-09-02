@@ -936,6 +936,103 @@ button.fpa-history-toggle:hover {
   flex-shrink: 0;
   min-width: 190px;
 }
+/* --- reports ---
+   Stat tiles, magnitude bars and log entries. Colour rules follow the same
+   discipline as the rest of the app: the tile accent and the bar fill carry
+   *status* (good / critical / accent), never decoration, and identity is
+   always carried by a label - the small role dot beside it is a reminder of
+   which chip this is, not the thing you have to read to tell them apart. */
+.fpa-stat-tile {
+  flex: 1 1 130px;
+  min-width: 130px;
+  border: 1px solid var(--fpa-border);
+  border-top: 3px solid var(--tile-color, var(--fpa-accent));
+  border-radius: 10px;
+  background: var(--fpa-surface-2);
+  padding: 14px 16px;
+}
+.fpa-stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--tile-color, var(--fpa-text));
+  direction: ltr;
+  text-align: right;
+}
+.fpa-stat-label {
+  font-size: 11.5px;
+  color: var(--fpa-text-secondary);
+  margin-top: 4px;
+}
+
+/* Magnitude rows. A fixed grid (not flex) so every bar starts at the same x
+   and lengths are visually comparable down the column - bars that begin at
+   different offsets cannot be compared by eye. */
+.fpa-bar-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.1fr) 1fr 1fr;
+  grid-template-areas: "label a b";
+  gap: 12px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--fpa-border);
+}
+.fpa-bar-row:last-child {
+  border-bottom: none;
+}
+.fpa-bar-head {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--fpa-text-muted);
+  letter-spacing: 0.02em;
+  padding-bottom: 8px;
+}
+.fpa-bar-track {
+  flex: 1;
+  height: 9px;
+  min-width: 0;
+  border-radius: 5px;
+  background: var(--fpa-hover-overlay);
+  overflow: hidden;
+}
+.fpa-bar-fill {
+  height: 100%;
+  /* Rounded data-end anchored to the baseline: the bar grows from the track's
+     inline-start, so only its inline-END is rounded. Logical properties, not
+     `border-radius: 0 5px 5px 0` - this page is RTL, so a physical
+     left/right radius rounds the anchored end and squares the data end,
+     which is exactly backwards. */
+  border-start-end-radius: 5px;
+  border-end-end-radius: 5px;
+  min-width: 2px;
+}
+.fpa-bar-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fpa-text-secondary);
+  min-width: 14px;
+  direction: ltr;
+}
+.fpa-role-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.fpa-log-entry {
+  border: 1px solid var(--fpa-border);
+  border-right: 4px solid var(--role-color, var(--fpa-border));
+  border-radius: 9px;
+  background: var(--fpa-surface-2);
+  padding: 11px 13px;
+}
+.fpa-log-entry-overdue {
+  border-color: var(--fpa-critical);
+  background: var(--fpa-critical-soft);
+}
+
 /* --- roles: lean drag palette (designer) vs full manager (settings) --- */
 .fpa-role-palette {
   display: flex;
